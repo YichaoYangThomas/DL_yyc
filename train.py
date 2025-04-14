@@ -9,15 +9,17 @@ import os
 import numpy as np
 
 def vicreg_loss(x, y, sim_coef, var_coef, cov_coef):
-    # 不变性损失
-    sim_loss = F.mse_loss(F.normalize(x, dim=-1), F.normalize(y, dim=-1))
+    # 不变性损失 (使用smooth_l1_loss，对异常值更鲁棒)
+    sim_loss = F.smooth_l1_loss(F.normalize(x, dim=-1), F.normalize(y, dim=-1))
     
-    # 方差损失 
+    # 方差损失 (增加目标阈值到2.0，增强特征表达能力)
     std_x = torch.sqrt(x.var(dim=0) + 0.0001)
     std_y = torch.sqrt(y.var(dim=0) + 0.0001)
-    var_loss = torch.mean(F.relu(1 - std_x)) + torch.mean(F.relu(1 - std_y))
+    var_loss = torch.mean(F.relu(2.0 - std_x)) + torch.mean(F.relu(2.0 - std_y))
     
-    # 协方差损失
+    # 协方差损失 (先归一化特征，减少规模效应)
+    x = F.normalize(x, dim=-1)
+    y = F.normalize(y, dim=-1)
     x = x - x.mean(dim=0)
     y = y - y.mean(dim=0)
     cov_x = (x.T @ x) / (x.shape[0] - 1)
@@ -26,7 +28,11 @@ def vicreg_loss(x, y, sim_coef, var_coef, cov_coef):
     
     return sim_coef * sim_loss + var_coef * var_loss + cov_coef * cov_loss, sim_loss, var_loss, cov_loss
 
-def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
+def add_noise(tensor, noise_level=0.02):
+    # 添加适量的高斯噪声，增强数据多样性
+    return tensor + torch.randn_like(tensor) * noise_level
+
+def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存目录参数
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
     
@@ -38,18 +44,27 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
     total_params = sum(p.numel() for p in model.parameters())
     print(f"模型总参数数量: {total_params / 1e6:.2f}M")
     
-    # 优化器 - 仅微调学习率，保持权重衰减不变
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1.2e-4, weight_decay=0.01)
+    # 优化器 - 增加权重衰减
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05)
     
     # 批处理大小和梯度累积
     batch_size = 32
-    grad_accum_steps = 4
+    grad_accum_steps = 16  # 增加梯度累积步数，相当于更大的批次
     
-    # 学习率调整参数 - 适度延长预热阶段
-    warmup_steps = 600
+    # 学习率调整参数
+    warmup_steps = 1000  # 增加预热步数
+    
+    # 早停策略参数
+    patience = 5  # 允许5个epoch无改善
+    no_improve_epochs = 0
+    
+    # 模型权重平均相关参数
+    use_ema = True  # 启用指数移动平均
+    ema_decay = 0.998
+    ema_params = {}
     
     # 数据加载
-    data_path = "/scratch/DL25SP/train"
+    data_path = "/scratch/DL24FA/train"
     print(f"加载训练数据: {data_path}")
     
     train_loader = create_wall_dataloader(
@@ -59,6 +74,9 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
         batch_size=batch_size,
         train=True
     )
+    
+    # 如果有验证集，可以加载验证集
+    # val_loader = create_wall_dataloader(...)
     
     total_steps = epochs * len(train_loader)
     print(f"总训练步数: {total_steps}")
@@ -73,18 +91,18 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     
+    # 初始化EMA参数字典
+    if use_ema:
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                ema_params[name] = param.data.clone()
+    
     model.train()
     # 创建epoch进度条
     pbar_epoch = tqdm(range(epochs), desc='训练进度')
     
     optimizer.zero_grad()  # 初始化优化器
     accumulated_loss = 0
-    
-    # 添加早停机制
-    patience = 7  # 连续7个epoch没有改善则降低学习率
-    no_improve_epochs = 0
-    early_stop_threshold = 15  # 连续15个epoch没有改善则停止训练
-    lr_factor = 0.8  # 学习率降低因子
     
     for epoch in pbar_epoch:
         epoch_loss = 0
@@ -93,12 +111,12 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
         # 创建batch进度条
         pbar_batch = tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs}', leave=False)
         for batch_idx, batch in enumerate(pbar_batch):
-            # 学习率调整 - 保持原有的余弦退火策略，微调参数
+            # 学习率调整 - 使用更平滑的调度策略
             if step < warmup_steps:
-                curr_lr = 1.2e-4 * step / warmup_steps
+                curr_lr = 1e-4 * step / warmup_steps
             else:
                 progress = (step - warmup_steps) / (total_steps - warmup_steps)
-                curr_lr = 1.2e-4 * 0.5 * (1 + math.cos(math.pi * progress))
+                curr_lr = 1e-4 * 0.5 * (1 + math.cos(math.pi * progress))
             
             # 更新学习率
             for param_group in optimizer.param_groups:
@@ -113,18 +131,25 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
                 states = batch.states.to(device)
                 actions = batch.actions.to(device)
                     
-                # 数据增强 - 保持原有策略
+                # 增强数据增强策略
+                # 1. 水平翻转 (概率0.3)
                 if random.random() < 0.3:
-                    states = torch.flip(states, [3])  # 水平翻转
+                    states = torch.flip(states, [3])
                     actions[:, :, 0] = -actions[:, :, 0]
+                
+                # 2. 垂直翻转 (概率0.3)
                 if random.random() < 0.3:
-                    states = torch.flip(states, [4])  # 垂直翻转
+                    states = torch.flip(states, [4])
                     actions[:, :, 1] = -actions[:, :, 1]
                 
-                # 添加轻微的高斯噪声增强数据多样性
+                # 3. 添加轻微噪声 (概率0.2)
                 if random.random() < 0.2:
-                    noise = torch.randn_like(states) * 0.02
-                    states = states + noise
+                    states = add_noise(states, noise_level=0.01)
+                
+                # 4. 添加输入抖动 (概率0.15)
+                if random.random() < 0.15:
+                    jitter = torch.zeros_like(actions).uniform_(-0.05, 0.05)
+                    actions = actions + jitter
                     
                 B, T, C, H, W = states.shape
                 curr_states = states[:, :-1].contiguous().view(-1, C, H, W)
@@ -137,20 +162,35 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
                 
                 actions_flat = actions.reshape(-1, 2)
                 
+                # 获取墙壁通道用于碰撞检测
+                wall_channel = next_states[:, 1:2, :, :]
+                
+                # 判断是否发生碰撞
+                collision_mask = (wall_channel.view(-1, H * W).max(dim=1)[0] > 0).float().unsqueeze(1)
+                
                 # 预测下一个状态
                 pred_next = model.predictor(pred_states, actions_flat)
+                
+                # 预测碰撞概率
+                pred_collision = model.predictor.collision_head(pred_next)
+                
+                # 碰撞损失
+                collision_loss = F.binary_cross_entropy(pred_collision, collision_mask)
 
-                # 计算VICReg损失 - 稍微调整权重
+                # 计算VICReg损失
                 total_loss, sim_loss, var_loss, cov_loss = vicreg_loss(
                     pred_next, 
                     target_states.detach(), 
                     sim_coef=25.0, 
-                    var_coef=26.0,  # 轻微增加方差损失权重
-                    cov_coef=1.1    # 轻微增加协方差损失权重
+                    var_coef=25.0, 
+                    cov_coef=1.0
                 )
                 
+                # 组合损失 - 增加碰撞损失权重
+                loss = total_loss + collision_loss * 0.2
+                
                 # 梯度累积
-                loss = total_loss / grad_accum_steps
+                loss = loss / grad_accum_steps
                 loss.backward()
                 
                 accumulated_loss += loss.item() * grad_accum_steps
@@ -159,33 +199,27 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
                 if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(train_loader):
                     # 梯度裁剪
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    
-                    # 检查梯度是否有NaN或Inf
-                    valid_gradients = True
-                    for name, param in model.named_parameters():
-                        if param.grad is not None:
-                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                                print(f"警告: 参数 {name} 的梯度出现NaN或Inf值！")
-                                valid_gradients = False
-                                break
-                    
-                    if valid_gradients:
-                        optimizer.step()
-                    else:
-                        print("跳过更新，使用上一个正常的梯度")
-                    
+                    optimizer.step()
                     optimizer.zero_grad()
                     
-                    # 更新目标编码器 - 微调动量系数
+                    # 更新目标编码器
                     momentum = min(0.996, 0.99 + step/total_steps * 0.006)
                     model.update_target(momentum=momentum)
                     
-                    # 每300个批次记录一次损失
+                    # 更新EMA参数
+                    if use_ema:
+                        with torch.no_grad():
+                            for name, param in model.named_parameters():
+                                if param.requires_grad:
+                                    ema_params[name] = ema_params[name] * ema_decay + param.data * (1 - ema_decay)
+                    
+                    # 每100个批次记录一次损失
                     if batch_idx % 100 == 0:
                         tqdm.write(
                             f"[Epoch {epoch+1}/{epochs}][Batch {batch_idx+1}/{total_batches}] "
                             f"损失: {accumulated_loss:.4f}, 学习率: {curr_lr:.6f}, "
-                            f"相似性损失: {sim_loss.item():.4f}, 方差损失: {var_loss.item():.4f}, 协方差损失: {cov_loss.item():.4f}"
+                            f"相似性损失: {sim_loss.item():.4f}, 方差损失: {var_loss.item():.4f}, "
+                            f"协方差损失: {cov_loss.item():.4f}, 碰撞损失: {collision_loss.item():.4f}"
                         )
                         accumulated_loss = 0
             
@@ -208,17 +242,63 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
         
         # 每个epoch保存一次检查点
         checkpoint_path = os.path.join(save_dir, f"checkpoint_epoch_{epoch+1}.pth")
-        torch.save({
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'loss': avg_epoch_loss,
-        }, checkpoint_path)
+        
+        # 如果使用EMA，保存EMA参数
+        if use_ema:
+            # 暂存当前参数
+            original_params = {}
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    original_params[name] = param.data.clone()
+                    param.data.copy_(ema_params[name])
+            
+            # 保存模型
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_epoch_loss,
+                'is_ema': True
+            }, checkpoint_path)
+            
+            # 恢复原始参数
+            for name, param in model.named_parameters():
+                if name in original_params:
+                    param.data.copy_(original_params[name])
+        else:
+            # 直接保存模型
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_epoch_loss,
+            }, checkpoint_path)
         
         # 保存最佳模型
         if avg_epoch_loss < best_loss:
             best_loss = avg_epoch_loss
-            torch.save(model.state_dict(), os.path.join(save_dir, "model_weights.pth"))
+            best_model_path = os.path.join(save_dir, "best_model.pth")
+            
+            # 如果使用EMA，保存EMA参数作为最佳模型
+            if use_ema:
+                # 暂存当前参数
+                original_params = {}
+                for name, param in model.named_parameters():
+                    if param.requires_grad:
+                        original_params[name] = param.data.clone()
+                        param.data.copy_(ema_params[name])
+                
+                # 保存模型
+                torch.save(model.state_dict(), best_model_path)
+                
+                # 恢复原始参数
+                for name, param in model.named_parameters():
+                    if name in original_params:
+                        param.data.copy_(original_params[name])
+            else:
+                # 直接保存模型
+                torch.save(model.state_dict(), best_model_path)
+                
             tqdm.write(
                 f"\nEpoch {epoch+1} 总结:\n"
                 f"平均损失: {avg_epoch_loss:.4f} (新最佳)\n"
@@ -226,27 +306,25 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
             )
             no_improve_epochs = 0
         else:
-            no_improve_epochs += 1
             tqdm.write(
                 f"\nEpoch {epoch+1} 总结:\n"
                 f"平均损失: {avg_epoch_loss:.4f}\n"
                 f"学习率: {curr_lr:.6f}\n"
             )
-            
-            # 如果连续多个epoch没有改善，降低学习率
-            if no_improve_epochs >= patience:
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] *= lr_factor
-                tqdm.write(f"连续{patience}个epoch没有改善，降低学习率至 {param_group['lr']:.6f}")
-                no_improve_epochs = 0  # 重置计数器
-            
-            # 如果连续过多epoch没有改善，提前结束训练
-            if no_improve_epochs >= early_stop_threshold:
-                tqdm.write(f"连续{early_stop_threshold}个epoch没有改善，提前结束训练，避免过拟合")
-                break
+            no_improve_epochs += 1
+        
+        # 早停策略
+        if no_improve_epochs >= patience:
+            tqdm.write(f"早停：连续 {patience} 个epoch没有改善，停止训练")
+            break
     
     print("\n训练完成!")
     print(f"最佳损失: {best_loss:.4f}")
+    
+    # 加载最佳模型
+    best_model_path = os.path.join(save_dir, "best_model.pth")
+    model.load_state_dict(torch.load(best_model_path))
+    
     return model
 
 

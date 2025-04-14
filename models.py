@@ -76,15 +76,17 @@ class Prober(torch.nn.Module):
 
 
 def vicreg_loss(x, y, sim_coef=25.0, var_coef=25.0, cov_coef=1.0):
-    # 不变性损失 - 使用标准化向量的MSE损失
-    sim_loss = F.mse_loss(F.normalize(x, dim=-1), F.normalize(y, dim=-1))
+    # Invariance loss (normalized)
+    sim_loss = F.smooth_l1_loss(F.normalize(x, dim=-1), F.normalize(y, dim=-1))
     
-    # 方差损失 - 确保表示中每个维度都有足够的变化
+    # Variance loss with stronger regularization
     std_x = torch.sqrt(x.var(dim=0) + 0.0001)
     std_y = torch.sqrt(y.var(dim=0) + 0.0001)
-    var_loss = torch.mean(F.relu(1.0 - std_x)) + torch.mean(F.relu(1.0 - std_y))
+    var_loss = torch.mean(F.relu(2.0 - std_x)) + torch.mean(F.relu(2.0 - std_y))
     
-    # 协方差损失 - 减少不同维度之间的相关性
+    # Covariance loss with normalized features
+    x = F.normalize(x, dim=-1)
+    y = F.normalize(y, dim=-1)
     x = x - x.mean(dim=0)
     y = y - y.mean(dim=0)
     cov_x = (x.T @ x) / (x.shape[0] - 1)
@@ -96,12 +98,14 @@ def vicreg_loss(x, y, sim_coef=25.0, var_coef=25.0, cov_coef=1.0):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1):
+    def __init__(self, in_channels, out_channels, stride=1, dropout_rate=0.1):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride=stride, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
+        self.dropout1 = nn.Dropout2d(dropout_rate)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
+        self.dropout2 = nn.Dropout2d(dropout_rate)
         
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
@@ -113,10 +117,36 @@ class ResBlock(nn.Module):
 
     def forward(self, x):
         out = F.leaky_relu(self.bn1(self.conv1(x)), 0.2)
+        out = self.dropout1(out)
         out = self.bn2(self.conv2(out))
         out += self.shortcut(x)
         out = F.leaky_relu(out, 0.2)
+        out = self.dropout2(out)
         return out
+
+
+class AttentionModule(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.query = nn.Conv2d(channels, channels//8, 1)
+        self.key = nn.Conv2d(channels, channels//8, 1)
+        self.value = nn.Conv2d(channels, channels, 1)
+        self.gamma = nn.Parameter(torch.zeros(1))
+        
+    def forward(self, x):
+        batch, c, h, w = x.size()
+        
+        q = self.query(x).view(batch, -1, h*w).permute(0, 2, 1)
+        k = self.key(x).view(batch, -1, h*w)
+        v = self.value(x).view(batch, -1, h*w)
+        
+        attn = torch.bmm(q, k)
+        attn = F.softmax(attn, dim=2)
+        
+        out = torch.bmm(v, attn.permute(0, 2, 1))
+        out = out.view(batch, c, h, w)
+        
+        return x + self.gamma * out
 
 
 class SpatialAttention(nn.Module):
@@ -133,33 +163,43 @@ class SpatialAttention(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, latent_dim=128):  # 减少潜在空间维度
+    def __init__(self, latent_dim=192):  # 减小潜在维度
         super().__init__()
         self.conv1 = nn.Sequential(
-            nn.Conv2d(2, 32, 7, stride=2, padding=3),  # 减少通道数
-            nn.BatchNorm2d(32),
-            nn.LeakyReLU(0.2, True)
+            nn.Conv2d(2, 48, 7, stride=2, padding=3),  # 减少通道数
+            nn.BatchNorm2d(48),
+            nn.LeakyReLU(0.2, True),
+            nn.Dropout2d(0.1)  # 添加Dropout
         )
         
-        # 简化网络结构，减少参数量
+        # 简化网络结构并添加注意力模块
         self.layer1 = nn.Sequential(
-            ResBlock(32, 64, stride=2),
+            ResBlock(48, 96, stride=2, dropout_rate=0.1),
+            SpatialAttention(96)  # 添加空间注意力
         )
         self.layer2 = nn.Sequential(
-            ResBlock(64, 128, stride=2),
+            ResBlock(96, 192, stride=2, dropout_rate=0.15),
+            SpatialAttention(192)  # 添加空间注意力
         )
         self.layer3 = nn.Sequential(
-            ResBlock(128, 256, stride=2),
+            ResBlock(192, 384, stride=2, dropout_rate=0.2),
+            AttentionModule(384)  # 添加自注意力模块
         )
         
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Sequential(
-            nn.Linear(256, latent_dim),
-            nn.LayerNorm(latent_dim)
+            nn.Linear(384, latent_dim),
+            nn.LayerNorm(latent_dim),
+            nn.Dropout(0.2)  # 添加更多Dropout
         )
         
     def forward(self, x):
         x = self.conv1(x)
+        B, C, H, W = x.size()
+        device = x.device
+        # Generate positional embeddings dynamically
+        pos_embed = self.create_positional_embedding(C, H, W, device)
+        x = x + pos_embed
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
@@ -171,43 +211,68 @@ class Encoder(nn.Module):
     def create_positional_embedding(self, channels, height, width, device):
         y_embed = torch.linspace(0, 1, steps=height, device=device).unsqueeze(1).repeat(1, width)
         x_embed = torch.linspace(0, 1, steps=width, device=device).unsqueeze(0).repeat(height, 1)
-        pos_embed = torch.stack((x_embed, y_embed), dim=0)
-        pos_embed = pos_embed.unsqueeze(0).repeat(1, channels // 2, 1, 1)
+        pos_embed = torch.stack((x_embed, y_embed), dim=0)  # Shape: (2, H, W)
+        pos_embed = pos_embed.unsqueeze(0).repeat(1, channels // 2, 1, 1)  # Shape: (1, C, H, W)
         return pos_embed
 
 
 class Predictor(nn.Module):
-    def __init__(self, latent_dim=128, action_dim=2):  # 更新潜在空间维度
+    def __init__(self, latent_dim=192, action_dim=2):  # 更新潜在空间维度
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(latent_dim + action_dim, 256),
-            nn.LayerNorm(256),
+            nn.Linear(latent_dim + action_dim, 384),
+            nn.LayerNorm(384),
             nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.15),  # 轻微增加dropout以减轻过拟合
+            nn.Dropout(0.25),  # 增加dropout率
             
-            nn.Linear(256, 256),
-            nn.LayerNorm(256),
+            nn.Linear(384, 384),
+            nn.LayerNorm(384),
             nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.15),  # 轻微增加dropout以减轻过拟合
+            nn.Dropout(0.25),  # 增加dropout率
             
-            nn.Linear(256, latent_dim),
+            nn.Linear(384, latent_dim),
             nn.LayerNorm(latent_dim)
+        )
+        
+        # Add collision prediction with improved head
+        self.collision_head = nn.Sequential(
+            nn.Linear(latent_dim, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.LayerNorm(64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
         )
         
     def forward(self, state, action):
         x = torch.cat([state, action], dim=-1)
+        feat = self.net(x)
+        
+        # Predict collision probability
+        collision = self.collision_head(feat)
+        
+        # If collision predicted, reduce action magnitude
+        action_scale = 1.0 - 0.9 * collision
+        scaled_action = action * action_scale
+        
+        # Recompute with scaled action
+        x = torch.cat([state, scaled_action], dim=-1)
         return self.net(x)
 
 
 class JEPAModel(nn.Module):
-    def __init__(self, latent_dim=128):  # 更新潜在空间维度
+    def __init__(self, latent_dim=192):  # 更新潜在空间维度
         super().__init__()
         self.encoder = Encoder(latent_dim)
         self.predictor = Predictor(latent_dim)
         self.target_encoder = Encoder(latent_dim)
         self.repr_dim = latent_dim
         
-        # 初始化目标编码器
+        # Initialize target encoder
         for param_q, param_k in zip(self.encoder.parameters(), 
                                   self.target_encoder.parameters()):
             param_k.data.copy_(param_q.data)
@@ -231,11 +296,11 @@ class JEPAModel(nn.Module):
         T = actions.shape[1] + 1
         D = self.repr_dim
         
-        # 获取初始嵌入
+        # Get initial embedding - remove tuple unpacking
         curr_state = self.encoder(states.squeeze(1))  # [B, D]
         predictions = [curr_state]
         
-        # 预测未来状态
+        # Predict future states
         for t in range(T-1):
             curr_state = self.predictor(curr_state, actions[:, t])
             predictions.append(curr_state)
