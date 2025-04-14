@@ -26,12 +26,12 @@ def vicreg_loss(x, y, sim_coef, var_coef, cov_coef):
     
     return sim_coef * sim_loss + var_coef * var_loss + cov_coef * cov_loss, sim_loss, var_loss, cov_loss
 
-def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
+def train(epochs=50, save_dir="./"):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
     
     # 创建模型
-    model = JEPAModel().to(device)
+    model = JEPAModel(latent_dim=256).to(device)  # 增加潜在维度
     print(f"模型创建完成，潜在维度: {model.repr_dim}")
     
     # 计算模型参数数量
@@ -39,7 +39,7 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
     print(f"模型总参数数量: {total_params / 1e6:.2f}M")
     
     # 优化器
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
     
     # 批处理大小和梯度累积
     batch_size = 32
@@ -47,9 +47,11 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
     
     # 学习率调整参数
     warmup_steps = 500
+    # 添加学习率重启策略参数
+    restart_epochs = [10, 20, 30, 40]  # 在这些epoch结束时重启学习率
     
     # 数据加载
-    data_path = "/scratch/DL24FA/train"
+    data_path = "/scratch/DL25SP/train"
     print(f"加载训练数据: {data_path}")
     
     train_loader = create_wall_dataloader(
@@ -130,13 +132,31 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
                 pred_next = model.predictor(pred_states, actions_flat)
 
                 # 计算VICReg损失
-                total_loss, sim_loss, var_loss, cov_loss = vicreg_loss(
+                total_vicreg_loss, sim_loss, var_loss, cov_loss = vicreg_loss(
                     pred_next, 
                     target_states.detach(), 
-                    sim_coef=25.0, 
-                    var_coef=25.0, 
-                    cov_coef=1.0
+                    sim_coef=20.0,  
+                    var_coef=30.0,  
+                    cov_coef=2.0    
                 )
+                
+                # 计算辅助任务损失 - 重建损失
+                recon_loss = 0
+                if random.random() < 0.7:  # 70%概率使用重建损失
+                    recon = model.reconstruct(pred_states)
+                    recon_loss = F.mse_loss(recon, curr_states) * 5.0  # 权重5.0
+                
+                # 计算辅助任务损失 - 对比损失
+                contrastive_loss = 0
+                if random.random() < 0.7:  # 70%概率使用对比损失
+                    # 创建两个增强视图
+                    jitter = torch.randn_like(pred_states) * 0.1
+                    z1 = pred_states
+                    z2 = pred_states + jitter
+                    contrastive_loss = model.compute_contrastive_loss(z1, z2) * 1.0  # 权重1.0
+                
+                # 总损失 = VICReg损失 + 重建损失 + 对比损失
+                total_loss = total_vicreg_loss + recon_loss + contrastive_loss
                 
                 # 梯度累积
                 loss = total_loss / grad_accum_steps
@@ -151,16 +171,16 @@ def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
                     optimizer.step()
                     optimizer.zero_grad()
                     
-                    # 更新目标编码器
-                    momentum = min(0.996, 0.99 + step/total_steps * 0.006)
-                    model.update_target(momentum=momentum)
+                    # 更新目标编码器 - 使用动态动量
+                    model.update_target(step=step, total_steps=total_steps)
                     
-                    # 每300个批次记录一次损失
+                    # 每100个批次记录一次损失
                     if batch_idx % 100 == 0:
                         tqdm.write(
                             f"[Epoch {epoch+1}/{epochs}][Batch {batch_idx+1}/{total_batches}] "
-                            f"损失: {accumulated_loss:.4f}, 学习率: {curr_lr:.6f}, "
-                            f"相似性损失: {sim_loss.item():.4f}, 方差损失: {var_loss.item():.4f}, 协方差损失: {cov_loss.item():.4f}"
+                            f"总损失: {accumulated_loss:.4f}, 学习率: {curr_lr:.6f}, "
+                            f"VICReg: {total_vicreg_loss.item():.4f}, 重建: {recon_loss:.4f}, 对比: {contrastive_loss:.4f}, "
+                            f"相似性: {sim_loss.item():.4f}, 方差: {var_loss.item():.4f}, 协方差: {cov_loss.item():.4f}"
                         )
                         accumulated_loss = 0
             
