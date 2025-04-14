@@ -41,9 +41,9 @@ def train(epochs=50, save_dir="./"):
     # 优化器
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
     
-    # 批处理大小和梯度累积
-    batch_size = 32
-    grad_accum_steps = 4
+    # 批处理大小和梯度累积 - 减小以节省内存
+    batch_size = 16  # 从32减小到16
+    grad_accum_steps = 8  # 从4增加到8，保持有效批量大小
     
     # 学习率调整参数
     warmup_steps = 500
@@ -144,25 +144,22 @@ def train(epochs=50, save_dir="./"):
                 
                 # 计算辅助任务损失 - 重建损失
                 recon_loss = 0
-                if random.random() < 0.7:  # 70%概率使用重建损失
+                if random.random() < 0.5:  # 降低概率从0.7到0.5
                     recon = model.reconstruct(pred_states)
                     # 调整重建图像或输入图像的大小，确保尺寸匹配
                     if recon.shape[2:] != curr_states.shape[2:]:
                         # 方式1: 调整重建结果尺寸以匹配输入
                         recon = F.interpolate(recon, size=curr_states.shape[2:], mode='bilinear', align_corners=False)
-                        # 或者方式2: 调整输入尺寸以匹配重建结果
-                        # curr_states_resized = F.interpolate(curr_states, size=recon.shape[2:], mode='bilinear', align_corners=False)
-                        # recon_loss = F.mse_loss(recon, curr_states_resized) * 5.0
-                    recon_loss = F.mse_loss(recon, curr_states) * 5.0  # 权重5.0
+                    recon_loss = F.mse_loss(recon, curr_states) * 2.0  # 权重从5.0降到2.0
                 
                 # 计算辅助任务损失 - 对比损失
                 contrastive_loss = 0
-                if random.random() < 0.7:  # 70%概率使用对比损失
+                if random.random() < 0.5:  # 降低概率从0.7到0.5
                     # 创建两个增强视图
                     jitter = torch.randn_like(pred_states) * 0.1
                     z1 = pred_states
                     z2 = pred_states + jitter
-                    contrastive_loss = model.compute_contrastive_loss(z1, z2) * 1.0  # 权重1.0
+                    contrastive_loss = model.compute_contrastive_loss(z1, z2) * 0.5  # 权重从1.0降到0.5
                 
                 # 总损失 = VICReg损失 + 重建损失 + 对比损失
                 total_loss = total_vicreg_loss + recon_loss + contrastive_loss

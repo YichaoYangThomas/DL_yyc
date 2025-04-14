@@ -188,7 +188,7 @@ class Encoder(nn.Module):
 
 
 class Predictor(nn.Module):
-    def __init__(self, latent_dim=256, action_dim=2, hidden_dim=512):  # 增加潜在空间维度
+    def __init__(self, latent_dim=256, action_dim=2, hidden_dim=512):
         super().__init__()
         # 初始特征提取层
         self.feature_net = nn.Sequential(
@@ -224,20 +224,14 @@ class Predictor(nn.Module):
             nn.LayerNorm(latent_dim)
         )
         
-        # 初始化隐藏状态
-        self.hidden = None
         self.latent_dim = latent_dim
-        
-    def reset_hidden(self, batch_size, device):
-        # 重置GRU隐藏状态
-        self.hidden = torch.zeros(2, batch_size, 512, device=device)
+        self.hidden_dim = hidden_dim
         
     def forward(self, state, action):
         batch_size = state.shape[0]
         
-        # 如果隐藏状态为空或批次大小变化，重置隐藏状态
-        if self.hidden is None or self.hidden.size(1) != batch_size:
-            self.reset_hidden(batch_size, state.device)
+        # 每次forward都创建新的隐藏状态，避免重复使用计算图
+        hidden = torch.zeros(2, batch_size, self.hidden_dim, device=state.device)
             
         # 连接状态和动作
         x = torch.cat([state, action], dim=-1)
@@ -248,8 +242,8 @@ class Predictor(nn.Module):
         # 添加序列维度
         x = x.unsqueeze(1)  # [B, 1, H]
         
-        # GRU处理
-        x, self.hidden = self.gru(x, self.hidden)
+        # GRU处理 - 注意这里不再保存hidden状态到self.hidden
+        x, _ = self.gru(x, hidden)
         x = x.squeeze(1)  # [B, H]
         
         # 自注意力权重
@@ -344,9 +338,6 @@ class JEPAModel(nn.Module):
         B = states.shape[0]
         T = actions.shape[1] + 1
         D = self.repr_dim
-        
-        # 重置预测器的隐藏状态
-        self.predictor.reset_hidden(B, states.device)
         
         # 获取初始嵌入
         curr_state = self.encoder(states.squeeze(1))  # [B, D]
