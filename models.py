@@ -281,7 +281,7 @@ class JEPAModel(nn.Module):
             nn.Linear(512, 1024),
             nn.LayerNorm(1024),
             nn.LeakyReLU(0.2, True),
-            nn.Linear(1024, 2 * 32 * 32),  # 假设输入图像为2x32x32
+            nn.Linear(1024, 2 * 65 * 65),  # 更新为图像的实际尺寸2x65x65
         )
         
         # 初始化目标编码器
@@ -311,7 +311,7 @@ class JEPAModel(nn.Module):
         """重建输入图像作为辅助任务"""
         batch_size = z.shape[0]
         recon = self.decoder(z)
-        recon = recon.view(batch_size, 2, 32, 32)
+        recon = recon.view(batch_size, 2, 65, 65)  # 更新为图像的实际尺寸
         return recon
     
     def compute_contrastive_loss(self, z1, z2, temperature=0.1):

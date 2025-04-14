@@ -91,10 +91,12 @@ def train(epochs=50, save_dir="./"):
         for batch_idx, batch in enumerate(pbar_batch):
             # 学习率调整
             if step < warmup_steps:
-                curr_lr = 1e-4 * step / warmup_steps
+                curr_lr = 3e-4 * step / warmup_steps
             else:
                 progress = (step - warmup_steps) / (total_steps - warmup_steps)
-                curr_lr = 1e-4 * 0.5 * (1 + math.cos(math.pi * progress))
+                curr_lr = 3e-4 * 0.5 * (1 + math.cos(math.pi * progress))
+                # 添加最小学习率限制
+                curr_lr = max(curr_lr, 1e-6)
             
             # 更新学习率
             for param_group in optimizer.param_groups:
@@ -144,6 +146,13 @@ def train(epochs=50, save_dir="./"):
                 recon_loss = 0
                 if random.random() < 0.7:  # 70%概率使用重建损失
                     recon = model.reconstruct(pred_states)
+                    # 调整重建图像或输入图像的大小，确保尺寸匹配
+                    if recon.shape[2:] != curr_states.shape[2:]:
+                        # 方式1: 调整重建结果尺寸以匹配输入
+                        recon = F.interpolate(recon, size=curr_states.shape[2:], mode='bilinear', align_corners=False)
+                        # 或者方式2: 调整输入尺寸以匹配重建结果
+                        # curr_states_resized = F.interpolate(curr_states, size=recon.shape[2:], mode='bilinear', align_corners=False)
+                        # recon_loss = F.mse_loss(recon, curr_states_resized) * 5.0
                     recon_loss = F.mse_loss(recon, curr_states) * 5.0  # 权重5.0
                 
                 # 计算辅助任务损失 - 对比损失
