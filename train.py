@@ -26,29 +26,27 @@ def vicreg_loss(x, y, sim_coef, var_coef, cov_coef):
     
     return sim_coef * sim_loss + var_coef * var_loss + cov_coef * cov_loss, sim_loss, var_loss, cov_loss
 
-def train(epochs=50, save_dir="./"):
+def train(epochs=50, save_dir="./"):  # 增加训练轮数和保存目录参数
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
     
     # 创建模型
-    model = JEPAModel(latent_dim=256).to(device)  # 增加潜在维度
+    model = JEPAModel().to(device)
     print(f"模型创建完成，潜在维度: {model.repr_dim}")
     
     # 计算模型参数数量
     total_params = sum(p.numel() for p in model.parameters())
     print(f"模型总参数数量: {total_params / 1e6:.2f}M")
     
-    # 优化器
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
+    # 优化器 - 仅微调学习率，保持权重衰减不变
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.2e-4, weight_decay=0.01)
     
-    # 批处理大小和梯度累积 - 减小以节省内存
-    batch_size = 16  # 从32减小到16
-    grad_accum_steps = 8  # 从4增加到8，保持有效批量大小
+    # 批处理大小和梯度累积
+    batch_size = 32
+    grad_accum_steps = 4
     
-    # 学习率调整参数
-    warmup_steps = 500
-    # 添加学习率重启策略参数
-    restart_epochs = [10, 20, 30, 40]  # 在这些epoch结束时重启学习率
+    # 学习率调整参数 - 适度延长预热阶段
+    warmup_steps = 600
     
     # 数据加载
     data_path = "/scratch/DL25SP/train"
@@ -82,6 +80,12 @@ def train(epochs=50, save_dir="./"):
     optimizer.zero_grad()  # 初始化优化器
     accumulated_loss = 0
     
+    # 添加早停机制
+    patience = 7  # 连续7个epoch没有改善则降低学习率
+    no_improve_epochs = 0
+    early_stop_threshold = 15  # 连续15个epoch没有改善则停止训练
+    lr_factor = 0.8  # 学习率降低因子
+    
     for epoch in pbar_epoch:
         epoch_loss = 0
         num_batches = 0
@@ -89,14 +93,12 @@ def train(epochs=50, save_dir="./"):
         # 创建batch进度条
         pbar_batch = tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs}', leave=False)
         for batch_idx, batch in enumerate(pbar_batch):
-            # 学习率调整
+            # 学习率调整 - 保持原有的余弦退火策略，微调参数
             if step < warmup_steps:
-                curr_lr = 3e-4 * step / warmup_steps
+                curr_lr = 1.2e-4 * step / warmup_steps
             else:
                 progress = (step - warmup_steps) / (total_steps - warmup_steps)
-                curr_lr = 3e-4 * 0.5 * (1 + math.cos(math.pi * progress))
-                # 添加最小学习率限制
-                curr_lr = max(curr_lr, 1e-6)
+                curr_lr = 1.2e-4 * 0.5 * (1 + math.cos(math.pi * progress))
             
             # 更新学习率
             for param_group in optimizer.param_groups:
@@ -111,13 +113,18 @@ def train(epochs=50, save_dir="./"):
                 states = batch.states.to(device)
                 actions = batch.actions.to(device)
                     
-                # 数据增强
-                if random.random() < 0.3:  # 降低翻转概率
+                # 数据增强 - 保持原有策略
+                if random.random() < 0.3:
                     states = torch.flip(states, [3])  # 水平翻转
                     actions[:, :, 0] = -actions[:, :, 0]
-                if random.random() < 0.3:  # 降低翻转概率
+                if random.random() < 0.3:
                     states = torch.flip(states, [4])  # 垂直翻转
                     actions[:, :, 1] = -actions[:, :, 1]
+                
+                # 添加轻微的高斯噪声增强数据多样性
+                if random.random() < 0.2:
+                    noise = torch.randn_like(states) * 0.02
+                    states = states + noise
                     
                 B, T, C, H, W = states.shape
                 curr_states = states[:, :-1].contiguous().view(-1, C, H, W)
@@ -133,36 +140,14 @@ def train(epochs=50, save_dir="./"):
                 # 预测下一个状态
                 pred_next = model.predictor(pred_states, actions_flat)
 
-                # 计算VICReg损失
-                total_vicreg_loss, sim_loss, var_loss, cov_loss = vicreg_loss(
+                # 计算VICReg损失 - 稍微调整权重
+                total_loss, sim_loss, var_loss, cov_loss = vicreg_loss(
                     pred_next, 
                     target_states.detach(), 
-                    sim_coef=20.0,  
-                    var_coef=30.0,  
-                    cov_coef=2.0    
+                    sim_coef=25.0, 
+                    var_coef=26.0,  # 轻微增加方差损失权重
+                    cov_coef=1.1    # 轻微增加协方差损失权重
                 )
-                
-                # 计算辅助任务损失 - 重建损失
-                recon_loss = 0
-                if random.random() < 0.5:  # 降低概率从0.7到0.5
-                    recon = model.reconstruct(pred_states)
-                    # 调整重建图像或输入图像的大小，确保尺寸匹配
-                    if recon.shape[2:] != curr_states.shape[2:]:
-                        # 方式1: 调整重建结果尺寸以匹配输入
-                        recon = F.interpolate(recon, size=curr_states.shape[2:], mode='bilinear', align_corners=False)
-                    recon_loss = F.mse_loss(recon, curr_states) * 2.0  # 权重从5.0降到2.0
-                
-                # 计算辅助任务损失 - 对比损失
-                contrastive_loss = 0
-                if random.random() < 0.5:  # 降低概率从0.7到0.5
-                    # 创建两个增强视图
-                    jitter = torch.randn_like(pred_states) * 0.1
-                    z1 = pred_states
-                    z2 = pred_states + jitter
-                    contrastive_loss = model.compute_contrastive_loss(z1, z2) * 0.5  # 权重从1.0降到0.5
-                
-                # 总损失 = VICReg损失 + 重建损失 + 对比损失
-                total_loss = total_vicreg_loss + recon_loss + contrastive_loss
                 
                 # 梯度累积
                 loss = total_loss / grad_accum_steps
@@ -174,19 +159,33 @@ def train(epochs=50, save_dir="./"):
                 if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(train_loader):
                     # 梯度裁剪
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer.step()
+                    
+                    # 检查梯度是否有NaN或Inf
+                    valid_gradients = True
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                                print(f"警告: 参数 {name} 的梯度出现NaN或Inf值！")
+                                valid_gradients = False
+                                break
+                    
+                    if valid_gradients:
+                        optimizer.step()
+                    else:
+                        print("跳过更新，使用上一个正常的梯度")
+                    
                     optimizer.zero_grad()
                     
-                    # 更新目标编码器 - 使用动态动量
-                    model.update_target(step=step, total_steps=total_steps)
+                    # 更新目标编码器 - 微调动量系数
+                    momentum = min(0.996, 0.99 + step/total_steps * 0.006)
+                    model.update_target(momentum=momentum)
                     
-                    # 每100个批次记录一次损失
+                    # 每300个批次记录一次损失
                     if batch_idx % 100 == 0:
                         tqdm.write(
                             f"[Epoch {epoch+1}/{epochs}][Batch {batch_idx+1}/{total_batches}] "
-                            f"总损失: {accumulated_loss:.4f}, 学习率: {curr_lr:.6f}, "
-                            f"VICReg: {total_vicreg_loss.item():.4f}, 重建: {recon_loss:.4f}, 对比: {contrastive_loss:.4f}, "
-                            f"相似性: {sim_loss.item():.4f}, 方差: {var_loss.item():.4f}, 协方差: {cov_loss.item():.4f}"
+                            f"损失: {accumulated_loss:.4f}, 学习率: {curr_lr:.6f}, "
+                            f"相似性损失: {sim_loss.item():.4f}, 方差损失: {var_loss.item():.4f}, 协方差损失: {cov_loss.item():.4f}"
                         )
                         accumulated_loss = 0
             
@@ -225,12 +224,26 @@ def train(epochs=50, save_dir="./"):
                 f"平均损失: {avg_epoch_loss:.4f} (新最佳)\n"
                 f"学习率: {curr_lr:.6f}\n"
             )
+            no_improve_epochs = 0
         else:
+            no_improve_epochs += 1
             tqdm.write(
                 f"\nEpoch {epoch+1} 总结:\n"
                 f"平均损失: {avg_epoch_loss:.4f}\n"
                 f"学习率: {curr_lr:.6f}\n"
             )
+            
+            # 如果连续多个epoch没有改善，降低学习率
+            if no_improve_epochs >= patience:
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] *= lr_factor
+                tqdm.write(f"连续{patience}个epoch没有改善，降低学习率至 {param_group['lr']:.6f}")
+                no_improve_epochs = 0  # 重置计数器
+            
+            # 如果连续过多epoch没有改善，提前结束训练
+            if no_improve_epochs >= early_stop_threshold:
+                tqdm.write(f"连续{early_stop_threshold}个epoch没有改善，提前结束训练，避免过拟合")
+                break
     
     print("\n训练完成!")
     print(f"最佳损失: {best_loss:.4f}")

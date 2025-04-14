@@ -133,39 +133,28 @@ class SpatialAttention(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, latent_dim=256):  # 增加潜在空间维度
+    def __init__(self, latent_dim=128):  # 减少潜在空间维度
         super().__init__()
         self.conv1 = nn.Sequential(
-            nn.Conv2d(2, 64, 7, stride=2, padding=3),  # 增加初始通道数
-            nn.BatchNorm2d(64),
+            nn.Conv2d(2, 32, 7, stride=2, padding=3),  # 减少通道数
+            nn.BatchNorm2d(32),
             nn.LeakyReLU(0.2, True)
         )
         
-        # 增加ResBlock数量，深化网络
+        # 简化网络结构，减少参数量
         self.layer1 = nn.Sequential(
-            ResBlock(64, 128, stride=2),
-            ResBlock(128, 128, stride=1),  # 添加额外ResBlock
-            SelfAttention(128),  # 添加自注意力层
+            ResBlock(32, 64, stride=2),
         )
         self.layer2 = nn.Sequential(
-            ResBlock(128, 256, stride=2),
-            ResBlock(256, 256, stride=1),  # 添加额外ResBlock
-            SelfAttention(256),  # 添加自注意力层
+            ResBlock(64, 128, stride=2),
         )
         self.layer3 = nn.Sequential(
-            ResBlock(256, 512, stride=2),
-            ResBlock(512, 512, stride=1),  # 添加额外ResBlock
-            SelfAttention(512),  # 添加自注意力层
+            ResBlock(128, 256, stride=2),
         )
         
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        
-        # 添加非线性投影头，替代简单的线性层
-        self.projection = nn.Sequential(
-            nn.Linear(512, 512),
-            nn.LayerNorm(512),
-            nn.LeakyReLU(0.2, True),
-            nn.Linear(512, latent_dim),
+        self.fc = nn.Sequential(
+            nn.Linear(256, latent_dim),
             nn.LayerNorm(latent_dim)
         )
         
@@ -176,7 +165,7 @@ class Encoder(nn.Module):
         x = self.layer3(x)
         x = self.avg_pool(x)
         x = x.view(x.size(0), -1)
-        x = self.projection(x)
+        x = self.fc(x)
         return x
 
     def create_positional_embedding(self, channels, height, width, device):
@@ -188,95 +177,35 @@ class Encoder(nn.Module):
 
 
 class Predictor(nn.Module):
-    def __init__(self, latent_dim=256, action_dim=2, hidden_dim=512):
+    def __init__(self, latent_dim=128, action_dim=2):  # 更新潜在空间维度
         super().__init__()
-        # 初始特征提取层
-        self.feature_net = nn.Sequential(
-            nn.Linear(latent_dim + action_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim + action_dim, 256),
+            nn.LayerNorm(256),
             nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.3),
-        )
-        
-        # 添加GRU层捕捉时序依赖
-        self.gru = nn.GRU(
-            input_size=hidden_dim,
-            hidden_size=hidden_dim,
-            num_layers=2,
-            batch_first=True,
-            dropout=0.2
-        )
-        
-        # 添加注意力机制
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Dropout(0.15),  # 轻微增加dropout以减轻过拟合
+            
+            nn.Linear(256, 256),
+            nn.LayerNorm(256),
             nn.LeakyReLU(0.2, True),
-            nn.Linear(hidden_dim // 2, 1)
-        )
-        
-        # 输出层
-        self.output_net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_dim, latent_dim),
+            nn.Dropout(0.15),  # 轻微增加dropout以减轻过拟合
+            
+            nn.Linear(256, latent_dim),
             nn.LayerNorm(latent_dim)
         )
         
-        self.latent_dim = latent_dim
-        self.hidden_dim = hidden_dim
-        
     def forward(self, state, action):
-        batch_size = state.shape[0]
-        
-        # 每次forward都创建新的隐藏状态，避免重复使用计算图
-        hidden = torch.zeros(2, batch_size, self.hidden_dim, device=state.device)
-            
-        # 连接状态和动作
         x = torch.cat([state, action], dim=-1)
-        
-        # 特征提取
-        x = self.feature_net(x)
-        
-        # 添加序列维度
-        x = x.unsqueeze(1)  # [B, 1, H]
-        
-        # GRU处理 - 注意这里不再保存hidden状态到self.hidden
-        x, _ = self.gru(x, hidden)
-        x = x.squeeze(1)  # [B, H]
-        
-        # 自注意力权重
-        attn_weight = self.attention(x)
-        attn_weight = torch.sigmoid(attn_weight)
-        
-        # 应用注意力
-        x = x * attn_weight
-        
-        # 生成输出
-        out = self.output_net(x)
-        
-        return out
+        return self.net(x)
 
 
 class JEPAModel(nn.Module):
-    def __init__(self, latent_dim=256):  # 更新潜在空间维度
+    def __init__(self, latent_dim=128):  # 更新潜在空间维度
         super().__init__()
         self.encoder = Encoder(latent_dim)
         self.predictor = Predictor(latent_dim)
         self.target_encoder = Encoder(latent_dim)
         self.repr_dim = latent_dim
-        
-        # 添加解码器用于重建任务（辅助任务）
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 512),
-            nn.LayerNorm(512),
-            nn.LeakyReLU(0.2, True),
-            nn.Linear(512, 1024),
-            nn.LayerNorm(1024),
-            nn.LeakyReLU(0.2, True),
-            nn.Linear(1024, 2 * 65 * 65),  # 更新为图像的实际尺寸2x65x65
-        )
         
         # 初始化目标编码器
         for param_q, param_k in zip(self.encoder.parameters(), 
@@ -284,48 +213,11 @@ class JEPAModel(nn.Module):
             param_k.data.copy_(param_q.data)
             param_k.requires_grad = False
             
-        # 初始目标动量值
-        self.base_momentum = 0.99
-        self.curr_momentum = self.base_momentum
-            
     @torch.no_grad()
-    def update_target(self, momentum=None, step=None, total_steps=None):
-        """动态动量更新策略"""
-        if momentum is not None:
-            self.curr_momentum = momentum
-        elif step is not None and total_steps is not None:
-            # 随着训练进度逐渐增加动量值
-            self.curr_momentum = self.base_momentum + (0.999 - self.base_momentum) * (step / total_steps)
-        
+    def update_target(self, momentum=0.99):
         for param_q, param_k in zip(self.encoder.parameters(),
                                   self.target_encoder.parameters()):
-            param_k.data = self.curr_momentum * param_k.data + (1.0 - self.curr_momentum) * param_q.data
-    
-    def reconstruct(self, z):
-        """重建输入图像作为辅助任务"""
-        batch_size = z.shape[0]
-        recon = self.decoder(z)
-        recon = recon.view(batch_size, 2, 65, 65)  # 更新为图像的实际尺寸
-        return recon
-    
-    def compute_contrastive_loss(self, z1, z2, temperature=0.1):
-        """计算对比损失作为辅助任务"""
-        batch_size = z1.shape[0]
-        z1 = F.normalize(z1, dim=1)
-        z2 = F.normalize(z2, dim=1)
-        
-        # 余弦相似度矩阵
-        similarity_matrix = torch.matmul(z1, z2.T) / temperature
-        
-        # 正例是对角线上的元素
-        positives = torch.diag(similarity_matrix)
-        
-        # 对所有样本计算总损失
-        nll = -positives + torch.logsumexp(similarity_matrix, dim=1)
-        
-        # 平均损失
-        nll = torch.mean(nll)
-        return nll
+            param_k.data = momentum * param_k.data + (1.0 - momentum) * param_q.data
             
     def forward(self, states, actions):
         """
@@ -350,32 +242,3 @@ class JEPAModel(nn.Module):
             
         predictions = torch.stack(predictions, dim=1)  # [B, T, D]
         return predictions
-
-# 添加自注意力模块
-class SelfAttention(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.query = nn.Conv2d(channels, channels // 8, kernel_size=1)
-        self.key = nn.Conv2d(channels, channels // 8, kernel_size=1)
-        self.value = nn.Conv2d(channels, channels, kernel_size=1)
-        self.gamma = nn.Parameter(torch.zeros(1))
-        
-    def forward(self, x):
-        batch_size, C, height, width = x.size()
-        
-        # 获取查询、键、值
-        query = self.query(x).view(batch_size, -1, height * width).permute(0, 2, 1)  # B x HW x C/8
-        key = self.key(x).view(batch_size, -1, height * width)  # B x C/8 x HW
-        value = self.value(x).view(batch_size, -1, height * width)  # B x C x HW
-        
-        # 计算注意力权重
-        energy = torch.bmm(query, key)  # B x HW x HW
-        attention = F.softmax(energy, dim=2)
-        
-        # 应用注意力
-        out = torch.bmm(value, attention.permute(0, 2, 1))  # B x C x HW
-        out = out.view(batch_size, C, height, width)
-        
-        # 残差连接
-        out = self.gamma * out + x
-        return out
