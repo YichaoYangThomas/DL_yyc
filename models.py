@@ -3,7 +3,9 @@ import numpy as np
 from torch import nn
 from torch.nn import functional as F
 import torch
-import math  # Add this import
+import torch.nn.functional as F
+from encs import ResNet, build_resnet
+from preds import ResPredictor, RNNPredictor
 
 
 def build_mlp(layers_dims: List[int]):
@@ -69,210 +71,116 @@ class Prober(torch.nn.Module):
         return output
 
 
-def vicreg_loss(x, y, sim_coef=25.0, var_coef=25.0, cov_coef=1.0):
-    # Invariance loss (normalized)
-    sim_loss = F.smooth_l1_loss(F.normalize(x, dim=-1), F.normalize(y, dim=-1))
-    
-    # Variance loss with stronger regularization
-    std_x = torch.sqrt(x.var(dim=0) + 0.0001)
-    std_y = torch.sqrt(y.var(dim=0) + 0.0001)
-    var_loss = torch.mean(F.relu(2.0 - std_x)) + torch.mean(F.relu(2.0 - std_y))
-    
-    # Covariance loss with normalized features
-    x = F.normalize(x, dim=-1)
-    y = F.normalize(y, dim=-1)
-    x = x - x.mean(dim=0)
-    y = y - y.mean(dim=0)
-    cov_x = (x.T @ x) / (x.shape[0] - 1)
-    cov_y = (y.T @ y) / (y.shape[0] - 1)
-    cov_loss = off_diagonal(cov_x).pow_(2).sum() + off_diagonal(cov_y).pow_(2).sum()
-    
-    total_loss = sim_coef * sim_loss + var_coef * var_loss + cov_coef * cov_loss
-    return total_loss, sim_loss, var_loss, cov_loss
-
-
-class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride=stride, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, 1, stride=stride),
-                nn.BatchNorm2d(out_channels)
-            )
-        else:
-            self.shortcut = nn.Identity()
-
-    def forward(self, x):
-        out = F.leaky_relu(self.bn1(self.conv1(x)), 0.2)
-        out = self.bn2(self.conv2(out))
-        out += self.shortcut(x)
-        out = F.leaky_relu(out, 0.2)
-        return out
-
-
-class SpatialAttention(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(channels, 1, kernel_size=1),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, x):
-        attn = self.conv(x)
-        return x * attn
-
-
 class Encoder(nn.Module):
-    def __init__(self, latent_dim=256):
+    def __init__(self, input_channels=2, input_size=(65, 65), repr_dim=256, projection_hidden_dim=256):
         super().__init__()
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(2, 64, 7, stride=2, padding=3),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, True)
+        self.conv_net = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
         )
-        
-        # Remove the fixed positional embedding initialization
-        
-        # 调整网络结构以更好地捕获空间特征
-        self.layer1 = nn.Sequential(
-            ResBlock(64, 128, stride=2),
-            ResBlock(128, 128)
-        )
-        self.layer2 = nn.Sequential(
-            ResBlock(128, 256, stride=2),
-            ResBlock(256, 256)
-        )
-        self.layer3 = nn.Sequential(
-            ResBlock(256, 512, stride=2),
-            ResBlock(512, 512)
-        )
-        
-        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+
+        with torch.no_grad():
+            sample_input = torch.zeros(1, input_channels, *input_size)
+            conv_output = self.conv_net(sample_input)
+            conv_output_size = conv_output.view(1, -1).size(1)
+
         self.fc = nn.Sequential(
-            nn.Linear(512, latent_dim),
-            nn.LayerNorm(latent_dim)
+            nn.Flatten(),
+            nn.Linear(conv_output_size, repr_dim),
+            nn.ReLU(),
         )
-        
+
     def forward(self, x):
-        x = self.conv1(x)
-        B, C, H, W = x.size()
-        device = x.device
-        # Generate positional embeddings dynamically
-        pos_embed = self.create_positional_embedding(C, H, W, device)
-        x = x + pos_embed
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.avg_pool(x)
-        x = x.view(x.size(0), -1)
+        x = self.conv_net(x)
         x = self.fc(x)
         return x
 
-    def create_positional_embedding(self, channels, height, width, device):
-        y_embed = torch.linspace(0, 1, steps=height, device=device).unsqueeze(1).repeat(1, width)
-        x_embed = torch.linspace(0, 1, steps=width, device=device).unsqueeze(0).repeat(height, 1)
-        pos_embed = torch.stack((x_embed, y_embed), dim=0)  # Shape: (2, H, W)
-        pos_embed = pos_embed.unsqueeze(0).repeat(1, channels // 2, 1, 1)  # Shape: (1, C, H, W)
-        return pos_embed
-
 
 class Predictor(nn.Module):
-    def __init__(self, latent_dim=256, action_dim=2):
+    def __init__(self, repr_dim=256, action_dim=2):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(latent_dim + action_dim, 512),
-            nn.LayerNorm(512),
-            nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.1),
-            
-            nn.Linear(512, 512),
-            nn.LayerNorm(512),
-            nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.1),
-            
-            nn.Linear(512, latent_dim),
-            nn.LayerNorm(latent_dim)
-        )
-        
-        # Add collision prediction
-        self.collision_head = nn.Sequential(
-            nn.Linear(latent_dim, 64),
+        self.mlp = nn.Sequential(
+            nn.Linear(repr_dim + action_dim, repr_dim),
             nn.ReLU(),
-            nn.Linear(64, 1),
-            nn.Sigmoid()
+            nn.Linear(repr_dim, repr_dim)
         )
-        
-    def forward(self, state, action):
-        x = torch.cat([state, action], dim=-1)
-        feat = self.net(x)
-        
-        # Predict collision probability
-        collision = self.collision_head(feat)
-        
-        # If collision predicted, reduce action magnitude
-        action_scale = 1.0 - 0.9 * collision
-        scaled_action = action * action_scale
-        
-        # Recompute with scaled action
-        x = torch.cat([state, scaled_action], dim=-1)
-        return self.net(x)
+
+    def forward(self, repr, action):
+        x = torch.cat([repr, action], dim=-1)
+        return self.mlp(x)
 
 
 class JEPAModel(nn.Module):
-    def __init__(self, latent_dim=256):
+    def __init__(self, device="cuda", repr_dim=256, action_dim=2):
         super().__init__()
-        self.encoder = Encoder(latent_dim)
-        self.predictor = Predictor(latent_dim)
-        self.target_encoder = Encoder(latent_dim)
-        self.repr_dim = latent_dim
-        
-        # Initialize target encoder
-        for param_q, param_k in zip(self.encoder.parameters(), 
-                                  self.target_encoder.parameters()):
-            param_k.data.copy_(param_q.data)
-            param_k.requires_grad = False
-            
-    @torch.no_grad()
-    def update_target(self, momentum=0.99):
-        for param_q, param_k in zip(self.encoder.parameters(),
-                                  self.target_encoder.parameters()):
-            param_k.data = momentum * param_k.data + (1.0 - momentum) * param_q.data
-            
+        self.device = device
+        self.repr_dim = repr_dim
+        self.action_dim = action_dim
+
+        self.encoder = Encoder().to(device)
+        self.predictor = Predictor().to(device)
+
     def forward(self, states, actions):
         """
-        During inference:
-            states: [B, 1, Ch, H, W] - initial state only
-            actions: [B, T-1, 2] - sequence of actions
-        Returns:
-            predictions: [B, T, D] - predicted representations
+        Args:
+            During training:
+                states: [B, T, Ch, H, W]
+            During inference:
+                states: [B, 1, Ch, H, W]
+            actions: [B, T-1, 2]
+
+        Output:
+            predictions: [B, T, D]
         """
-        B = states.shape[0]
-        T = actions.shape[1] + 1
-        D = self.repr_dim
-        
-        # Add debug prints
-        print(f"\nJEPA Forward Debug Info:")
-        print(f"Input states shape: {states.shape}")
-        print(f"Input actions shape: {actions.shape}")
-        
-        # Get initial embedding - remove tuple unpacking
-        curr_state = self.encoder(states.squeeze(1))  # [B, D]
-        print(f"Initial encoding shape: {curr_state.shape}")
-        predictions = [curr_state]
-        
-        # Predict future states
-        for t in range(T-1):
-            curr_state = self.predictor(curr_state, actions[:, t])
-            if t % 5 == 0:  # Print every 5 steps
-                print(f"Step {t} prediction stats - mean: {curr_state.mean():.3f}, std: {curr_state.std():.3f}")
-            predictions.append(curr_state)
-            
-        predictions = torch.stack(predictions, dim=1)  # [B, T, D]
-        print(f"Final predictions shape: {predictions.shape}\n")
+        B, T, C, H, W = states.shape
+        device = states.device
+
+        predictions = []
+        current_repr = self.encoder(states[:, 0])  # [B, D]
+        predictions.append(current_repr.unsqueeze(1))  # [B, 1, D]
+
+        for t in range(T - 1):
+            action = actions[:, t]
+            pred_repr = self.predictor(current_repr, action)
+            predictions.append(pred_repr.unsqueeze(1))
+            current_repr = pred_repr  # Update current representation with prediction
+
+        predictions = torch.cat(predictions, dim=1)  # [B, T, D]
+
         return predictions
+
+    def predict_future(self, init_states, actions):
+        """
+        Unroll the model to predict future representations.
+
+        Args:
+            init_states: [B, 1, Ch, H, W]
+            actions: [B, T-1, 2]
+
+        Returns:
+            predicted_reprs: [T, B, D]
+        """
+        B, _, C, H, W = init_states.shape
+        T_minus1 = actions.shape[1]
+        T = T_minus1 + 1
+
+        predicted_reprs = []
+
+        #initial state
+        current_repr = self.encoder(init_states[:, 0])  # [B, D]
+        predicted_reprs.append(current_repr.unsqueeze(0))  # [1, B, D]
+
+        for t in range(T_minus1):
+            action = actions[:, t]  # [B, action_dim]
+            # Predict next representation
+            pred_repr = self.predictor(current_repr, action)  # [B, D]
+            predicted_reprs.append(pred_repr.unsqueeze(0))  # [1, B, D]
+            # Update current representation for next step
+            current_repr = pred_repr
+
+        predicted_reprs = torch.cat(predicted_reprs, dim=0)  # [T, B, D]
+        return predicted_reprs

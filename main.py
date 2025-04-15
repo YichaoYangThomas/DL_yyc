@@ -1,8 +1,9 @@
 from dataset import create_wall_dataloader
 from evaluator import ProbingEvaluator
 import torch
-from models import MockModel, JEPAModel
+#from models import MockModel
 import glob
+from models import JEPAModel
 
 
 def get_device():
@@ -13,7 +14,7 @@ def get_device():
 
 
 def load_data(device):
-    data_path = "/scratch/DL25SP"
+    data_path = "/scratch/DL24FA"
 
     probe_train_ds = create_wall_dataloader(
         data_path=f"{data_path}/probe_normal/train",
@@ -36,17 +37,55 @@ def load_data(device):
         train=False,
     )
 
-    probe_val_ds = {"normal": probe_val_normal_ds, "wall": probe_val_wall_ds}
+    probe_val_wall_other_ds = create_wall_dataloader(
+        data_path=f"{data_path}/probe_wall_other/val",
+        probing=True,
+        device=device,
+        train=False,
+    )
+
+    probe_val_ds = {
+        "normal": probe_val_normal_ds,
+        "wall": probe_val_wall_ds,
+        "wall_other": probe_val_wall_other_ds,
+    }
 
     return probe_train_ds, probe_val_ds
 
 
+def load_expert_data(device):
+    data_path = "/scratch/DL25SP"
+
+    probe_train_expert_ds = create_wall_dataloader(
+        data_path=f"{data_path}/probe_expert/train",
+        probing=True,
+        device=device,
+        train=True,
+    )
+
+    probe_val_expert_ds = {
+        "expert": create_wall_dataloader(
+            data_path=f"{data_path}/probe_expert/val",
+            probing=True,
+            device=device,
+            train=False,
+        )
+    }
+
+    return probe_train_expert_ds, probe_val_expert_ds
+
+
 def load_model():
     """Load or initialize the model."""
-    model = JEPAModel()
-    model.load_state_dict(torch.load("model_weights.pth", weights_only=True))  # Added weights_only=True
-    model = model.to(get_device())
-    model.eval()
+    # TODO: Replace MockModel with your trained model
+    #model = MockModel()
+    model = JEPAModel(device=device)
+    model.to(device)
+    try:
+        model.load_state_dict(torch.load('model_weights.pth'))
+        print("Loaded saved JEPA model.")
+    except FileNotFoundError:
+        print("No saved model found, initializing a new model.")
     return model
 
 
@@ -69,6 +108,13 @@ def evaluate_model(device, model, probe_train_ds, probe_val_ds):
 
 if __name__ == "__main__":
     device = get_device()
-    probe_train_ds, probe_val_ds = load_data(device)
     model = load_model()
+
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total Trainable Parameters: {total_params:,}")
+
+    probe_train_ds, probe_val_ds = load_data(device)
     evaluate_model(device, model, probe_train_ds, probe_val_ds)
+
+    probe_train_expert_ds, probe_val_expert_ds = load_expert_data(device)
+    evaluate_model(device, model, probe_train_expert_ds, probe_val_expert_ds)

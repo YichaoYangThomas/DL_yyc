@@ -109,14 +109,13 @@ class ProbingEvaluator:
         )
 
         for epoch in tqdm(range(epochs), desc=f"Probe prediction epochs"):
-            epoch_losses = []
             for batch in tqdm(dataset, desc="Probe prediction step"):
                 ################################################################################
                 # TODO: Forward pass through your model
                 init_states = batch.states[:, 0:1]  # BS, 1, C, H, W
-                pred_encs = model(states=init_states, actions=batch.actions)
-                pred_encs = pred_encs.transpose(0, 1)  # # BS, T, D --> T, BS, D
-
+                #pred_encs = model(states=init_states, actions=batch.actions)
+                #pred_encs = pred_encs.transpose(0, 1)  # # BS, T, D --> T, BS, D
+                pred_encs = model.predict_future(init_states, batch.actions)
                 # Make sure pred_encs has shape (T, BS, D) at this point
                 ################################################################################
 
@@ -170,22 +169,8 @@ class ProbingEvaluator:
 
                 step += 1
 
-                # Add debug prints
-                print(f"\nProbing Debug Info:")
-                print(f"Initial states shape: {init_states.shape}")
-                pred_encs = model(states=init_states, actions=batch.actions)
-                print(f"Predicted encodings shape: {pred_encs.shape}")
-                print(f"True locations shape: {batch.locations.shape}")
-                print(f"Predicted locations shape: {pred_locs.shape}")
-                print(f"Location range - True: [{batch.locations.min():.3f}, {batch.locations.max():.3f}]")
-                print(f"Location range - Pred: [{pred_locs.min():.3f}, {pred_locs.max():.3f}]")
-                
-                epoch_losses.append(per_probe_loss.item())
-            
-            print(f"Epoch {epoch} average probe loss: {np.mean(epoch_losses):.4f}")
-
-            if self.quick_debug and step > 2:
-                break
+                if self.quick_debug and step > 2:
+                    break
 
         return prober
 
@@ -226,10 +211,10 @@ class ProbingEvaluator:
             ################################################################################
             # TODO: Forward pass through your model
             init_states = batch.states[:, 0:1]  # BS, 1 C, H, W
-            pred_encs = model(states=init_states, actions=batch.actions)
+            #pred_encs = model(states=init_states, actions=batch.actions)
             # # BS, T, D --> T, BS, D
-            pred_encs = pred_encs.transpose(0, 1)
-
+            #pred_encs = pred_encs.transpose(0, 1)
+            pred_encs = model.predict_future(init_states, batch.actions)
             # Make sure pred_encs has shape (T, BS, D) at this point
             ################################################################################
 
@@ -239,13 +224,6 @@ class ProbingEvaluator:
             pred_locs = torch.stack([prober(x) for x in pred_encs], dim=1)
             losses = location_losses(pred_locs, target)
             probing_losses.append(losses.cpu())
-
-            if idx % 10 == 0:  # Print every 10 batches
-                print(f"\nEvaluation Debug Info (batch {idx}):")
-                print(f"Predicted encodings stats - mean: {pred_encs.mean():.3f}, std: {pred_encs.std():.3f}")
-                print(f"Predicted locations stats - mean: {pred_locs.mean():.3f}, std: {pred_locs.std():.3f}")
-                print(f"True locations stats - mean: {target.mean():.3f}, std: {target.std():.3f}")
-                print(f"Current batch loss: {losses.mean().item():.4f}")
 
         losses_t = torch.stack(probing_losses, dim=0).mean(dim=0)
         losses_t = self.normalizer.unnormalize_mse(losses_t)
