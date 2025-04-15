@@ -83,9 +83,12 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
     cov_coef = 1.0
     collision_weight = 0.15  # 碰撞损失权重
     
-    # 启用混合精度训练
+    # 启用混合精度训练 - 使用新的API
     use_mixed_precision = True
-    scaler = torch.cuda.amp.GradScaler() if use_mixed_precision else None
+    scaler = torch.amp.GradScaler('cuda') if use_mixed_precision else None
+    
+    # 创建BCE损失，避免在autocast范围内使用不安全的F.binary_cross_entropy
+    bce_loss = torch.nn.BCELoss()
     
     # 数据加载
     data_path = "/scratch/DL25SP/train"
@@ -181,8 +184,8 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
                 curr_states = states[:, :-1].contiguous().view(-1, C, H, W)
                 next_states = states[:, 1:].contiguous().view(-1, C, H, W)
                 
-                # 使用混合精度
-                with torch.cuda.amp.autocast() if use_mixed_precision else torch.no_grad():
+                # 使用混合精度 - 更新为新API
+                with torch.amp.autocast('cuda') if use_mixed_precision else torch.no_grad():
                     # 前向传播
                     pred_states = model.encoder(curr_states)
                     with torch.no_grad():
@@ -202,9 +205,6 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
                     # 预测碰撞概率
                     pred_collision = model.predictor.collision_head(pred_next)
                     
-                    # 碰撞损失
-                    collision_loss = F.binary_cross_entropy(pred_collision, collision_mask)
-
                     # 计算VICReg损失
                     total_loss, sim_loss, var_loss, cov_loss = vicreg_loss(
                         pred_next, 
@@ -214,8 +214,11 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
                         cov_coef=cov_coef
                     )
                     
-                    # 组合损失
-                    loss = total_loss + collision_loss * collision_weight
+                # 在autocast上下文之外计算碰撞损失，避免混合精度问题
+                collision_loss = bce_loss(pred_collision, collision_mask)
+                    
+                # 组合损失
+                loss = total_loss + collision_loss * collision_weight
                 
                 # 梯度累积
                 loss = loss / grad_accum_steps
