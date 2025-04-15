@@ -88,7 +88,7 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
     scaler = torch.cuda.amp.GradScaler() if use_mixed_precision else None
     
     # 数据加载
-    data_path = "/scratch/DL24FA/train"
+    data_path = "/scratch/DL25SP/train"
     print(f"加载训练数据: {data_path}")
     
     train_loader = create_wall_dataloader(
