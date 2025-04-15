@@ -83,11 +83,11 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
     cov_coef = 1.0
     collision_weight = 0.15  # 碰撞损失权重
     
-    # 启用混合精度训练 - 使用新的API
-    use_mixed_precision = True
+    # 是否使用混合精度训练，出错暂时禁用
+    use_mixed_precision = False  # 暂时关闭混合精度
     scaler = torch.amp.GradScaler('cuda') if use_mixed_precision else None
     
-    # 创建BCE损失，避免在autocast范围内使用不安全的F.binary_cross_entropy
+    # 创建BCE损失
     bce_loss = torch.nn.BCELoss()
     
     # 数据加载
@@ -184,9 +184,44 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
                 curr_states = states[:, :-1].contiguous().view(-1, C, H, W)
                 next_states = states[:, 1:].contiguous().view(-1, C, H, W)
                 
-                # 使用混合精度 - 更新为新API
-                with torch.amp.autocast('cuda') if use_mixed_precision else torch.no_grad():
-                    # 前向传播
+                # 使用混合精度
+                if use_mixed_precision:
+                    with torch.amp.autocast('cuda'):
+                        # 前向传播
+                        pred_states = model.encoder(curr_states)
+                        with torch.no_grad():
+                            target_states = model.target_encoder(next_states)
+                        
+                        actions_flat = actions.reshape(-1, 2)
+                        
+                        # 获取墙壁通道用于碰撞检测
+                        wall_channel = next_states[:, 1:2, :, :]
+                        
+                        # 判断是否发生碰撞
+                        collision_mask = (wall_channel.view(-1, H * W).max(dim=1)[0] > 0).float().unsqueeze(1)
+                        
+                        # 预测下一个状态
+                        pred_next = model.predictor(pred_states, actions_flat)
+                        
+                        # 预测碰撞概率
+                        pred_collision = model.predictor.collision_head(pred_next)
+                        
+                        # 碰撞损失 - 在autocast内计算损失
+                        collision_loss = F.binary_cross_entropy(pred_collision, collision_mask.to(pred_collision.dtype))
+                        
+                        # 计算VICReg损失
+                        total_loss, sim_loss, var_loss, cov_loss = vicreg_loss(
+                            pred_next, 
+                            target_states.detach(), 
+                            sim_coef=sim_coef, 
+                            var_coef=var_coef, 
+                            cov_coef=cov_coef
+                        )
+                        
+                        # 组合损失
+                        loss = total_loss + collision_loss * collision_weight
+                else:
+                    # 不使用混合精度，普通前向传播
                     pred_states = model.encoder(curr_states)
                     with torch.no_grad():
                         target_states = model.target_encoder(next_states)
@@ -205,6 +240,9 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
                     # 预测碰撞概率
                     pred_collision = model.predictor.collision_head(pred_next)
                     
+                    # 碰撞损失
+                    collision_loss = bce_loss(pred_collision, collision_mask)
+                    
                     # 计算VICReg损失
                     total_loss, sim_loss, var_loss, cov_loss = vicreg_loss(
                         pred_next, 
@@ -214,11 +252,8 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
                         cov_coef=cov_coef
                     )
                     
-                # 在autocast上下文之外计算碰撞损失，避免混合精度问题
-                collision_loss = bce_loss(pred_collision, collision_mask)
-                    
-                # 组合损失
-                loss = total_loss + collision_loss * collision_weight
+                    # 组合损失
+                    loss = total_loss + collision_loss * collision_weight
                 
                 # 梯度累积
                 loss = loss / grad_accum_steps
