@@ -288,11 +288,14 @@ class Encoder(nn.Module):
         # 基础位置编码 - 5个通道
         base_embed = torch.stack([x_embed, y_embed, r, torch.sin(r * math.pi), torch.cos(r * math.pi)], dim=0)
         
-        # 计算需要的重复次数以覆盖所有通道
-        rep_factor = (channels + 4) // 5  # 向上取整
-        
-        # 重复位置编码到所需通道数
-        pos_embed = base_embed.repeat(rep_factor, 1, 1)[:channels]
+        # 确保位置编码的通道数与输入特征的通道数匹配
+        if channels <= 5:
+            # 如果需要的通道数少于5，只使用前几个通道
+            pos_embed = base_embed[:channels]
+        else:
+            # 如果需要的通道数多于5，重复基础编码并截断到所需通道数
+            repeats = (channels + 4) // 5
+            pos_embed = base_embed.repeat(repeats, 1, 1)[:channels]
         
         # 增加批次维度
         pos_embed = pos_embed.unsqueeze(0)  # [1, channels, H, W]
@@ -432,7 +435,16 @@ class LayerScale(nn.Module):
         self.gamma = nn.Parameter(init_values * torch.ones(dim))
         
     def forward(self, x):
-        return self.gamma * x
+        # 将gamma扩展为适合x形状的张量
+        if x.dim() == 4:  # 对于卷积特征图 [B, C, H, W]
+            return self.gamma.view(1, -1, 1, 1) * x
+        elif x.dim() == 2:  # 对于全连接层特征 [B, C]
+            return self.gamma.view(1, -1) * x
+        else:
+            # 对于其他维度，尝试智能广播
+            shape = [1] * x.dim()
+            shape[1] = -1  # 假设第1维是通道维度
+            return self.gamma.view(*shape) * x
 
 
 class AttentionModule(nn.Module):
