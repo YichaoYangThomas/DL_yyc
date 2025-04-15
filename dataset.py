@@ -29,16 +29,11 @@ class WallDataset:
         return len(self.states)
 
     def __getitem__(self, i):
-        # 复制数组以确保可写
-        states_array = self.states[i].copy()
-        actions_array = self.actions[i].copy()
-        
-        states = torch.from_numpy(states_array).float().to(self.device)
-        actions = torch.from_numpy(actions_array).float().to(self.device)
+        states = torch.from_numpy(self.states[i]).float().to(self.device)
+        actions = torch.from_numpy(self.actions[i]).float().to(self.device)
 
         if self.locations is not None:
-            locations_array = self.locations[i].copy()
-            locations = torch.from_numpy(locations_array).float().to(self.device)
+            locations = torch.from_numpy(self.locations[i]).float().to(self.device)
         else:
             locations = torch.empty(0).to(self.device)
 
