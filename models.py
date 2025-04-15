@@ -76,15 +76,15 @@ class Prober(torch.nn.Module):
 
 
 def vicreg_loss(x, y, sim_coef=25.0, var_coef=25.0, cov_coef=1.0):
-    # Invariance loss (normalized)
-    sim_loss = F.smooth_l1_loss(F.normalize(x, dim=-1), F.normalize(y, dim=-1))
+    # 不变性损失 (使用Huber损失，对异常值更鲁棒)
+    sim_loss = F.huber_loss(F.normalize(x, dim=-1), F.normalize(y, dim=-1), delta=0.1)
     
-    # Variance loss with stronger regularization
+    # 方差损失 (增强到2.5以获得更好的特征分布)
     std_x = torch.sqrt(x.var(dim=0) + 0.0001)
     std_y = torch.sqrt(y.var(dim=0) + 0.0001)
-    var_loss = torch.mean(F.relu(2.0 - std_x)) + torch.mean(F.relu(2.0 - std_y))
+    var_loss = torch.mean(F.relu(2.5 - std_x)) + torch.mean(F.relu(2.5 - std_y))
     
-    # Covariance loss with normalized features
+    # 协方差损失 (使用归一化特征)
     x = F.normalize(x, dim=-1)
     y = F.normalize(y, dim=-1)
     x = x - x.mean(dim=0)
@@ -98,185 +98,294 @@ def vicreg_loss(x, y, sim_coef=25.0, var_coef=25.0, cov_coef=1.0):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1, dropout_rate=0.1):
+    def __init__(self, in_channels, out_channels, stride=1, dropout_rate=0.1, use_se=True):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride=stride, padding=1)
+        self.use_se = use_se
+        
+        # 改进的残差块结构
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride=stride, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(out_channels)
         self.dropout1 = nn.Dropout2d(dropout_rate)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+        
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(out_channels)
         self.dropout2 = nn.Dropout2d(dropout_rate)
         
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, 1, stride=stride),
+                nn.Conv2d(in_channels, out_channels, 1, stride=stride, bias=False),
                 nn.BatchNorm2d(out_channels)
             )
         else:
             self.shortcut = nn.Identity()
+            
+        # 添加SE注意力模块
+        if use_se:
+            self.se = SEBlock(out_channels)
+            
+        # 添加随机深度
+        self.survival_prob = 0.8
+        self.apply_stochastic_depth = True if dropout_rate > 0 else False
 
     def forward(self, x):
+        # 随机深度：在训练时随机跳过整个块
+        if self.apply_stochastic_depth and self.training and torch.rand(1).item() > self.survival_prob:
+            return self.shortcut(x)
+            
         out = F.leaky_relu(self.bn1(self.conv1(x)), 0.2)
         out = self.dropout1(out)
         out = self.bn2(self.conv2(out))
+        
+        if self.use_se:
+            out = self.se(out)
+            
         out += self.shortcut(x)
         out = F.leaky_relu(out, 0.2)
         out = self.dropout2(out)
         return out
 
 
-class AttentionModule(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.query = nn.Conv2d(channels, channels//8, 1)
-        self.key = nn.Conv2d(channels, channels//8, 1)
-        self.value = nn.Conv2d(channels, channels, 1)
-        self.gamma = nn.Parameter(torch.zeros(1))
-        
+class SEBlock(nn.Module):
+    """挤压-激励注意力模块"""
+    def __init__(self, channels, reduction=16):
+        super(SEBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+
     def forward(self, x):
-        batch, c, h, w = x.size()
-        
-        q = self.query(x).view(batch, -1, h*w).permute(0, 2, 1)
-        k = self.key(x).view(batch, -1, h*w)
-        v = self.value(x).view(batch, -1, h*w)
-        
-        attn = torch.bmm(q, k)
-        attn = F.softmax(attn, dim=2)
-        
-        out = torch.bmm(v, attn.permute(0, 2, 1))
-        out = out.view(batch, c, h, w)
-        
-        return x + self.gamma * out
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
 
 
 class SpatialAttention(nn.Module):
+    """增强的空间注意力模块"""
     def __init__(self, channels):
         super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(channels, 1, kernel_size=1),
-            nn.Sigmoid()
-        )
-    
+        # 多尺度特征融合
+        self.conv_7x7 = nn.Conv2d(2, 1, kernel_size=7, padding=3)
+        self.conv_5x5 = nn.Conv2d(2, 1, kernel_size=5, padding=2)
+        self.conv_3x3 = nn.Conv2d(2, 1, kernel_size=3, padding=1)
+        self.conv_fuse = nn.Conv2d(3, 1, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
+        
     def forward(self, x):
-        attn = self.conv(x)
+        # 平均池化和最大池化
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        spatial_features = torch.cat([avg_out, max_out], dim=1)
+        
+        # 多尺度特征
+        attn1 = self.conv_7x7(spatial_features)
+        attn2 = self.conv_5x5(spatial_features)
+        attn3 = self.conv_3x3(spatial_features)
+        
+        # 融合多尺度特征
+        attn = torch.cat([attn1, attn2, attn3], dim=1)
+        attn = self.conv_fuse(attn)
+        attn = self.sigmoid(attn)
+        
         return x * attn
 
 
 class Encoder(nn.Module):
-    def __init__(self, latent_dim=192):  # 减小潜在维度
+    def __init__(self, latent_dim=160):  # 进一步减小潜在维度，避免过拟合
         super().__init__()
+        self.latent_dim = latent_dim
+        
+        # 初始卷积层
         self.conv1 = nn.Sequential(
-            nn.Conv2d(2, 48, 7, stride=2, padding=3),  # 减少通道数
+            nn.Conv2d(2, 48, 7, stride=2, padding=3, bias=False),
             nn.BatchNorm2d(48),
             nn.LeakyReLU(0.2, True),
-            nn.Dropout2d(0.1)  # 添加Dropout
+            SpatialAttention(48),  # 添加空间注意力
+            nn.Dropout2d(0.1)
         )
         
-        # 简化网络结构并添加注意力模块
+        # 引入Stochastic Depth
         self.layer1 = nn.Sequential(
-            ResBlock(48, 96, stride=2, dropout_rate=0.1),
-            SpatialAttention(96)  # 添加空间注意力
+            ResBlock(48, 96, stride=2, dropout_rate=0.1, use_se=True),
+            LayerScale(96),  # 添加层级缩放
+            SpatialAttention(96)
         )
+        
         self.layer2 = nn.Sequential(
-            ResBlock(96, 192, stride=2, dropout_rate=0.15),
-            SpatialAttention(192)  # 添加空间注意力
+            ResBlock(96, 192, stride=2, dropout_rate=0.15, use_se=True),
+            LayerScale(192),
+            AttentionModule(192, num_heads=4)  # 多头注意力
         )
+        
         self.layer3 = nn.Sequential(
-            ResBlock(192, 384, stride=2, dropout_rate=0.2),
-            AttentionModule(384)  # 添加自注意力模块
+            ResBlock(192, 320, stride=2, dropout_rate=0.2, use_se=True),
+            LayerScale(320),
+            AttentionModule(320, num_heads=8)  # 多头注意力
         )
         
-        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        # 全局信息集成
+        self.global_pool = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.AdaptiveMaxPool2d((1, 1))
+        )
+        
+        # 投影头部
         self.fc = nn.Sequential(
-            nn.Linear(384, latent_dim),
+            nn.Linear(320*2, latent_dim*2),  # 使用平均池化和最大池化的结果
+            nn.LayerNorm(latent_dim*2),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(0.3),
+            nn.Linear(latent_dim*2, latent_dim),
             nn.LayerNorm(latent_dim),
-            nn.Dropout(0.2)  # 添加更多Dropout
+            nn.Dropout(0.2)
         )
         
+        # 初始化权重
+        self.apply(self._init_weights)
+        
+    def _init_weights(self, m):
+        if isinstance(m, (nn.Conv2d, nn.Linear)):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+                
     def forward(self, x):
         x = self.conv1(x)
         B, C, H, W = x.size()
         device = x.device
-        # Generate positional embeddings dynamically
+        
+        # 生成位置编码
         pos_embed = self.create_positional_embedding(C, H, W, device)
         x = x + pos_embed
+        
+        # 特征提取
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.avg_pool(x)
-        x = x.view(x.size(0), -1)
+        
+        # 全局信息集成（结合平均池化和最大池化）
+        avg_feat = self.global_pool[0](x).view(B, -1)
+        max_feat = self.global_pool[1](x).view(B, -1)
+        x = torch.cat([avg_feat, max_feat], dim=1)
+        
+        # 特征投影
         x = self.fc(x)
         return x
 
     def create_positional_embedding(self, channels, height, width, device):
-        y_embed = torch.linspace(0, 1, steps=height, device=device).unsqueeze(1).repeat(1, width)
-        x_embed = torch.linspace(0, 1, steps=width, device=device).unsqueeze(0).repeat(height, 1)
-        pos_embed = torch.stack((x_embed, y_embed), dim=0)  # Shape: (2, H, W)
-        pos_embed = pos_embed.unsqueeze(0).repeat(1, channels // 2, 1, 1)  # Shape: (1, C, H, W)
+        """创建增强的位置编码"""
+        # 生成网格位置
+        y_embed = torch.linspace(-1, 1, steps=height, device=device).unsqueeze(1).repeat(1, width)
+        x_embed = torch.linspace(-1, 1, steps=width, device=device).unsqueeze(0).repeat(height, 1)
+        
+        # 计算径向距离
+        r = torch.sqrt(x_embed.pow(2) + y_embed.pow(2))
+        
+        # 生成正弦和余弦位置编码
+        pos_embed = torch.stack([x_embed, y_embed, r, torch.sin(r * math.pi), torch.cos(r * math.pi)], dim=0)
+        pos_embed = pos_embed[:channels].unsqueeze(0)  # 取需要的通道数
+        
         return pos_embed
 
 
 class Predictor(nn.Module):
-    def __init__(self, latent_dim=192, action_dim=2):  # 更新潜在空间维度
+    def __init__(self, latent_dim=160, action_dim=2):
         super().__init__()
+        # 主网络
         self.net = nn.Sequential(
-            nn.Linear(latent_dim + action_dim, 384),
-            nn.LayerNorm(384),
+            nn.Linear(latent_dim + action_dim, 320),
+            nn.LayerNorm(320),
             nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.25),  # 增加dropout率
+            nn.Dropout(0.3),  # 增加dropout率
             
-            nn.Linear(384, 384),
-            nn.LayerNorm(384),
+            nn.Linear(320, 320),
+            nn.LayerNorm(320),
             nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.25),  # 增加dropout率
+            nn.Dropout(0.3),
             
-            nn.Linear(384, latent_dim),
+            nn.Linear(320, 320),  # 添加额外层，增强表达能力
+            nn.LayerNorm(320),
+            nn.LeakyReLU(0.2, True),
+            nn.Dropout(0.3),
+            
+            nn.Linear(320, latent_dim),
             nn.LayerNorm(latent_dim)
         )
         
-        # Add collision prediction with improved head
+        # 碰撞预测头部
         self.collision_head = nn.Sequential(
             nn.Linear(latent_dim, 128),
             nn.LayerNorm(128),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.25),
             nn.Linear(128, 64),
             nn.LayerNorm(64),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.25),
             nn.Linear(64, 1),
             nn.Sigmoid()
         )
         
+        # 动作调整网络
+        self.action_adjust = nn.Sequential(
+            nn.Linear(latent_dim + action_dim, 64),
+            nn.LayerNorm(64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, action_dim),
+            nn.Tanh()  # 输出[-1,1]范围的调整系数
+        )
+        
+        # 初始化权重
+        self.apply(self._init_weights)
+        
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        
     def forward(self, state, action):
+        # 特征融合
         x = torch.cat([state, action], dim=-1)
         feat = self.net(x)
         
-        # Predict collision probability
+        # 预测碰撞概率
         collision = self.collision_head(feat)
         
-        # If collision predicted, reduce action magnitude
-        action_scale = 1.0 - 0.9 * collision
-        scaled_action = action * action_scale
+        # 动作调整
+        action_adj = self.action_adjust(torch.cat([feat, action], dim=-1))
+        scaled_action = action * (1.0 - 0.9 * collision) + action_adj * 0.1
         
-        # Recompute with scaled action
+        # 使用调整后的动作重新计算
         x = torch.cat([state, scaled_action], dim=-1)
         return self.net(x)
 
 
 class JEPAModel(nn.Module):
-    def __init__(self, latent_dim=192):  # 更新潜在空间维度
+    def __init__(self, latent_dim=160):
         super().__init__()
         self.encoder = Encoder(latent_dim)
         self.predictor = Predictor(latent_dim)
         self.target_encoder = Encoder(latent_dim)
         self.repr_dim = latent_dim
         
-        # Initialize target encoder
+        # 初始化目标编码器
         for param_q, param_k in zip(self.encoder.parameters(), 
                                   self.target_encoder.parameters()):
             param_k.data.copy_(param_q.data)
             param_k.requires_grad = False
+        
+        # 添加投影头 - 用于对抗训练
+        self.projection = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(latent_dim, latent_dim)
+        )
             
     @torch.no_grad()
     def update_target(self, momentum=0.99):
@@ -286,24 +395,85 @@ class JEPAModel(nn.Module):
             
     def forward(self, states, actions):
         """
-        During inference:
-            states: [B, 1, Ch, H, W] - initial state only
-            actions: [B, T-1, 2] - sequence of actions
-        Returns:
-            predictions: [B, T, D] - predicted representations
+        训练/推理通用前向传播
         """
         B = states.shape[0]
-        T = actions.shape[1] + 1
-        D = self.repr_dim
-        
-        # Get initial embedding - remove tuple unpacking
-        curr_state = self.encoder(states.squeeze(1))  # [B, D]
-        predictions = [curr_state]
-        
-        # Predict future states
-        for t in range(T-1):
-            curr_state = self.predictor(curr_state, actions[:, t])
-            predictions.append(curr_state)
+        if states.dim() == 5:  # [B, T, C, H, W] 格式
+            T = actions.shape[1] + 1
+            D = self.repr_dim
             
-        predictions = torch.stack(predictions, dim=1)  # [B, T, D]
-        return predictions
+            # 获取初始嵌入
+            curr_state = self.encoder(states.squeeze(1))  # [B, D]
+            predictions = [curr_state]
+            
+            # 预测未来状态
+            for t in range(T-1):
+                curr_state = self.predictor(curr_state, actions[:, t])
+                predictions.append(curr_state)
+                
+            predictions = torch.stack(predictions, dim=1)  # [B, T, D]
+            return predictions
+        else:  # [B, C, H, W] 格式
+            return self.encoder(states)
+
+
+class LayerScale(nn.Module):
+    """层级缩放，增强训练稳定性"""
+    def __init__(self, dim, init_values=1e-5):
+        super().__init__()
+        self.gamma = nn.Parameter(init_values * torch.ones(dim))
+        
+    def forward(self, x):
+        return self.gamma * x
+
+
+class AttentionModule(nn.Module):
+    """多头自注意力模块"""
+    def __init__(self, channels, num_heads=4):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = channels // num_heads
+        assert self.head_dim * num_heads == channels, "channels必须能被num_heads整除"
+        
+        self.qkv = nn.Conv2d(channels, channels * 3, 1, bias=False)
+        self.proj = nn.Conv2d(channels, channels, 1)
+        self.norm1 = nn.BatchNorm2d(channels)
+        self.norm2 = nn.BatchNorm2d(channels)
+        self.dropout = nn.Dropout2d(0.1)
+        
+        # FFN
+        self.ffn = nn.Sequential(
+            nn.Conv2d(channels, channels * 2, 1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout2d(0.1),
+            nn.Conv2d(channels * 2, channels, 1),
+            nn.Dropout2d(0.1)
+        )
+        
+    def forward(self, x):
+        b, c, h, w = x.shape
+        residual = x
+        
+        # Self-attention
+        qkv = self.qkv(x).reshape(b, 3, self.num_heads, self.head_dim, h*w)
+        q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]  # [B, num_heads, head_dim, H*W]
+        
+        q = q.permute(0, 1, 3, 2)  # [B, num_heads, H*W, head_dim]
+        k = k.permute(0, 1, 2, 3)  # [B, num_heads, head_dim, H*W]
+        v = v.permute(0, 1, 3, 2)  # [B, num_heads, H*W, head_dim]
+        
+        attn = torch.matmul(q, k) * (self.head_dim ** -0.5)  # [B, num_heads, H*W, H*W]
+        attn = F.softmax(attn, dim=-1)
+        
+        out = torch.matmul(attn, v)  # [B, num_heads, H*W, head_dim]
+        out = out.permute(0, 1, 3, 2).reshape(b, c, h, w)
+        out = self.proj(out)
+        out = self.dropout(out)
+        out = self.norm1(out + residual)
+        
+        # Feed Forward Network
+        residual = out
+        out = self.ffn(out)
+        out = self.norm2(out + residual)
+        
+        return out
