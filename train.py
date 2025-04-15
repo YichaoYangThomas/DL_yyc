@@ -46,7 +46,7 @@ def mixup_data(x, y, alpha=0.2):
     mixed_y = lam * y + (1 - lam) * y[index, :]
     return mixed_x, mixed_y
 
-def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存目录参数
+def train(epochs=20, save_dir="./checkpoints"):  # 增加训练轮数和保存目录参数
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
     

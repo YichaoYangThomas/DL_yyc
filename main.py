@@ -15,7 +15,7 @@ def get_device():
 
 def load_data(device):
     """加载评估数据。"""
-    data_path = "/scratch/DL24FA"
+    data_path = "/scratch/DL25SP"
     print(f"正在加载数据，路径: {data_path}")
 
     # 加载探测训练数据
