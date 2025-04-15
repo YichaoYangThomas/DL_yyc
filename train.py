@@ -114,7 +114,7 @@ def train_model(device):
     model = JEPAModel(device=device).to(device)
     
     # 训练参数
-    num_epochs = 30  # 增加训练轮数
+    num_epochs = 12  # 增加训练轮数
     batch_size = train_loader.batch_size
     
     # 学习率调度
