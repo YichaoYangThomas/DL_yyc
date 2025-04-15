@@ -208,23 +208,38 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
                 
                 # 梯度累积
                 loss = loss / grad_accum_steps
-                loss.backward()
                 
-                accumulated_loss += loss.item() * grad_accum_steps
-                
-                # 混合样本增强训练 (15%概率)
-                if random.random() < 0.15 and pred_states.size(0) > 2:
-                    # 随机混合批次中的两个状态
-                    idx1, idx2 = torch.randperm(pred_states.size(0))[:2]
-                    mix_ratio = random.uniform(0.7, 0.9)
-                    mixed_state = mix_ratio * pred_states[idx1] + (1 - mix_ratio) * pred_states[idx2]
-                    # 使用混合状态进行预测
-                    mixed_action = actions_flat[idx1]
-                    mixed_pred = model.predictor(mixed_state.unsqueeze(0), mixed_action.unsqueeze(0)).squeeze(0)
-                    # 添加到梯度计算中
-                    mixed_target = mix_ratio * target_states[idx1] + (1 - mix_ratio) * target_states[idx2]
-                    mixed_loss = F.mse_loss(mixed_pred, mixed_target.detach())
-                    (mixed_loss / grad_accum_steps).backward()
+                # 使用try-except包装backward操作以增加鲁棒性
+                try:
+                    # 如果要进行混合样本增强，保留计算图
+                    do_mixup = random.random() < 0.1 and pred_states.size(0) > 2
+                    loss.backward(retain_graph=do_mixup)
+                    
+                    accumulated_loss += loss.item() * grad_accum_steps
+                    
+                    # 混合样本增强训练 (10%概率)
+                    if do_mixup:
+                        # 随机混合批次中的两个状态
+                        idx1, idx2 = torch.randperm(pred_states.size(0))[:2]
+                        mix_ratio = random.uniform(0.7, 0.9)
+                        # 内存优化：使用detach()减少内存使用
+                        mixed_state = mix_ratio * pred_states[idx1].detach() + (1 - mix_ratio) * pred_states[idx2].detach()
+                        # 使用混合状态进行预测
+                        mixed_action = actions_flat[idx1]
+                        mixed_pred = model.predictor(mixed_state.unsqueeze(0), mixed_action.unsqueeze(0)).squeeze(0)
+                        # 添加到梯度计算中
+                        mixed_target = mix_ratio * target_states[idx1] + (1 - mix_ratio) * target_states[idx2]
+                        mixed_loss = F.mse_loss(mixed_pred, mixed_target.detach())
+                        (mixed_loss / grad_accum_steps).backward()
+                except RuntimeError as e:
+                    if "CUDA out of memory" in str(e):
+                        print(f"CUDA OOM 在backward阶段，跳过此批次")
+                        optimizer.zero_grad()  # 清空梯度
+                        if hasattr(torch.cuda, 'empty_cache'):
+                            torch.cuda.empty_cache()
+                        continue  # 跳到下一个批次
+                    else:
+                        raise e  # 重新抛出其他类型的错误
                 
                 # 梯度累积步骤完成后更新参数
                 if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(train_loader):
@@ -268,13 +283,14 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
                         accumulated_loss = 0
             
             except RuntimeError as e:
-                if 'out of memory' in str(e):
+                if 'out of memory' in str(e) or 'CUDA out of memory' in str(e):
                     print(f"内存不足，跳过批次 {batch_idx}")
                     optimizer.zero_grad()
                     torch.cuda.empty_cache()
                 else:
                     raise e
             
+            # 仅当没有因OOM跳过时才更新这些值
             epoch_loss += loss.item() * grad_accum_steps
             num_batches += 1
             step += 1
