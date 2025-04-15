@@ -285,9 +285,17 @@ class Encoder(nn.Module):
         # 计算径向距离
         r = torch.sqrt(x_embed.pow(2) + y_embed.pow(2))
         
-        # 生成正弦和余弦位置编码
-        pos_embed = torch.stack([x_embed, y_embed, r, torch.sin(r * math.pi), torch.cos(r * math.pi)], dim=0)
-        pos_embed = pos_embed[:channels].unsqueeze(0)  # 取需要的通道数
+        # 基础位置编码 - 5个通道
+        base_embed = torch.stack([x_embed, y_embed, r, torch.sin(r * math.pi), torch.cos(r * math.pi)], dim=0)
+        
+        # 计算需要的重复次数以覆盖所有通道
+        rep_factor = (channels + 4) // 5  # 向上取整
+        
+        # 重复位置编码到所需通道数
+        pos_embed = base_embed.repeat(rep_factor, 1, 1)[:channels]
+        
+        # 增加批次维度
+        pos_embed = pos_embed.unsqueeze(0)  # [1, channels, H, W]
         
         return pos_embed
 

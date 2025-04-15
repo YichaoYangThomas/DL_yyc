@@ -7,7 +7,7 @@ import random
 import math
 import os
 import numpy as np
-from torch.cuda.amp import autocast, GradScaler
+import torch.amp as amp
 
 def vicreg_loss(x, y, sim_coef, var_coef, cov_coef):
     # 不变性损失 (使用Huber损失，对异常值更鲁棒)
@@ -140,9 +140,9 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
     # 优化器 - 增加权重衰减并使用AdamW
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0.05, betas=(0.9, 0.999))
     
-    # 混合精度训练
+    # 混合精度训练 - 更新为新API
     use_amp = True
-    scaler = GradScaler() if use_amp else None
+    scaler = amp.GradScaler('cuda') if use_amp else None
     
     # 批处理大小和梯度累积
     batch_size = 32
@@ -264,8 +264,8 @@ def train(epochs=50, save_dir="./checkpoints"):  # 增加训练轮数和保存�
                 curr_states = states[:, :-1].contiguous().view(-1, C, H, W)
                 next_states = states[:, 1:].contiguous().view(-1, C, H, W)
                 
-                # 使用混合精度训练
-                with autocast(enabled=use_amp):
+                # 使用混合精度训练 - 更新为新API
+                with amp.autocast('cuda', enabled=use_amp):
                     # 前向传播
                     pred_states = model.encoder(curr_states)
                     with torch.no_grad():
