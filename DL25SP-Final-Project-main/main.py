@@ -1,7 +1,7 @@
 from dataset import create_wall_dataloader
 from evaluator import ProbingEvaluator
 import torch
-from models import JEPAModel
+from models import MockModel
 import glob
 
 
@@ -42,40 +42,13 @@ def load_data(device):
     }
 
     return probe_train_ds, probe_val_ds
-def load_expert_data(device):
-    data_path = "/scratch/DL25SP"
 
-    probe_train_expert_ds = create_wall_dataloader(
-        data_path=f"{data_path}/probe_expert/train",
-        probing=True,
-        device=device,
-        train=True,
-    )
-
-    probe_val_expert_ds = {
-        "expert": create_wall_dataloader(
-            data_path=f"{data_path}/probe_expert/val",
-            probing=True,
-            device=device,
-            train=False,
-        )
-    }
-
-    return probe_train_expert_ds, probe_val_expert_ds
 
 def load_model():
     """Load or initialize the model."""
     # TODO: Replace MockModel with your trained model
-    #model = MockModel()
-    model = JEPAModel(device=device)
-    model.to(device)
-    try:
-        model.load_state_dict(torch.load('model_weights.pth'))
-        print("成功加载JEPA模型权重")
-    except FileNotFoundError:
-        print("未找到模型权重，初始化新模型")
+    model = MockModel()
     return model
-
 
 
 def evaluate_model(device, model, probe_train_ds, probe_val_ds):
