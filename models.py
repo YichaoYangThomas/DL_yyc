@@ -75,14 +75,14 @@ class Prober(torch.nn.Module):
         return output
 
 
-def vicreg_loss(x, y, sim_coef=25.0, var_coef=25.0, cov_coef=1.0, var_threshold=2.0):
+def vicreg_loss(x, y, sim_coef=25.0, var_coef=25.0, cov_coef=1.0):
     # Invariance loss (normalized)
     sim_loss = F.smooth_l1_loss(F.normalize(x, dim=-1), F.normalize(y, dim=-1))
     
     # Variance loss with stronger regularization
     std_x = torch.sqrt(x.var(dim=0) + 0.0001)
     std_y = torch.sqrt(y.var(dim=0) + 0.0001)
-    var_loss = torch.mean(F.relu(var_threshold - std_x)) + torch.mean(F.relu(var_threshold - std_y))
+    var_loss = torch.mean(F.relu(1.8 - std_x)) + torch.mean(F.relu(1.8 - std_y))
     
     # Covariance loss with normalized features
     x = F.normalize(x, dim=-1)
@@ -98,7 +98,7 @@ def vicreg_loss(x, y, sim_coef=25.0, var_coef=25.0, cov_coef=1.0, var_threshold=
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1, dropout_rate=0.1):
+    def __init__(self, in_channels, out_channels, stride=1, dropout_rate=0.05):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride=stride, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
@@ -163,34 +163,37 @@ class SpatialAttention(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, latent_dim=192):  # 减小潜在维度
+    def __init__(self, latent_dim=256):  # 恢复到原始潜在维度
         super().__init__()
         self.conv1 = nn.Sequential(
-            nn.Conv2d(2, 48, 7, stride=2, padding=3),  # 减少通道数
-            nn.BatchNorm2d(48),
+            nn.Conv2d(2, 64, 7, stride=2, padding=3),  # 恢复原始通道数
+            nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, True),
-            nn.Dropout2d(0.1)  # 添加Dropout
+            nn.Dropout2d(0.05)  # 使用较小的Dropout
         )
         
-        # 简化网络结构并添加注意力模块
+        # 保持原有的网络结构，但添加轻微的正则化
         self.layer1 = nn.Sequential(
-            ResBlock(48, 96, stride=2, dropout_rate=0.1),
-            SpatialAttention(96)  # 添加空间注意力
+            ResBlock(64, 128, stride=2, dropout_rate=0.05),
+            ResBlock(128, 128, dropout_rate=0.05)
         )
         self.layer2 = nn.Sequential(
-            ResBlock(96, 192, stride=2, dropout_rate=0.15),
-            SpatialAttention(192)  # 添加空间注意力
+            ResBlock(128, 256, stride=2, dropout_rate=0.05),
+            ResBlock(256, 256, dropout_rate=0.05)
         )
         self.layer3 = nn.Sequential(
-            ResBlock(192, 384, stride=2, dropout_rate=0.2),
-            AttentionModule(384)  # 添加自注意力模块
+            ResBlock(256, 512, stride=2, dropout_rate=0.05),
+            ResBlock(512, 512, dropout_rate=0.05)
         )
+        
+        # 添加轻量级的空间注意力
+        self.attn = SpatialAttention(512)
         
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Sequential(
-            nn.Linear(384, latent_dim),
+            nn.Linear(512, latent_dim),
             nn.LayerNorm(latent_dim),
-            nn.Dropout(0.2)  # 添加更多Dropout
+            nn.Dropout(0.1)  # 轻微的Dropout
         )
         
     def forward(self, x):
@@ -203,6 +206,7 @@ class Encoder(nn.Module):
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
+        x = self.attn(x)  # 应用注意力
         x = self.avg_pool(x)
         x = x.view(x.size(0), -1)
         x = self.fc(x)
@@ -217,33 +221,33 @@ class Encoder(nn.Module):
 
 
 class Predictor(nn.Module):
-    def __init__(self, latent_dim=192, action_dim=2):  # 更新潜在空间维度
+    def __init__(self, latent_dim=256, action_dim=2):  # 恢复原始潜在空间维度
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(latent_dim + action_dim, 384),
-            nn.LayerNorm(384),
+            nn.Linear(latent_dim + action_dim, 512),
+            nn.LayerNorm(512),
             nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.25),  # 增加dropout率
+            nn.Dropout(0.15),  # 合理的Dropout
             
-            nn.Linear(384, 384),
-            nn.LayerNorm(384),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
             nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.25),  # 增加dropout率
+            nn.Dropout(0.15),  # 合理的Dropout
             
-            nn.Linear(384, latent_dim),
+            nn.Linear(512, latent_dim),
             nn.LayerNorm(latent_dim)
         )
         
-        # Add collision prediction with improved head
+        # 维持原有的碰撞预测头，微调结构
         self.collision_head = nn.Sequential(
             nn.Linear(latent_dim, 128),
             nn.LayerNorm(128),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.1),
             nn.Linear(128, 64),
             nn.LayerNorm(64),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.1),
             nn.Linear(64, 1),
             nn.Sigmoid()
         )
@@ -265,7 +269,7 @@ class Predictor(nn.Module):
 
 
 class JEPAModel(nn.Module):
-    def __init__(self, latent_dim=192):  # 更新潜在空间维度
+    def __init__(self, latent_dim=256):  # 恢复原始潜在空间维度
         super().__init__()
         self.encoder = Encoder(latent_dim)
         self.predictor = Predictor(latent_dim)

@@ -29,7 +29,7 @@ class WallDataset:
         return len(self.states)
 
     def __getitem__(self, i):
-        states = torch.from_numpy(np.array(self.states[i])).float().to(self.device)
+        states = torch.from_numpy(self.states[i]).float().to(self.device)
         actions = torch.from_numpy(self.actions[i]).float().to(self.device)
 
         if self.locations is not None:
