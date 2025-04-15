@@ -16,12 +16,6 @@ def build_mlp(layers_dims: List[int]):
     return nn.Sequential(*layers)
 
 
-def off_diagonal(x):
-    # 返回一个矩阵中除对角线外的所有元素
-    n = x.shape[0]
-    return x.flatten()[:-1].view(n-1, n+1)[:, 1:].flatten()
-
-
 class MockModel(torch.nn.Module):
     """
     Does nothing. Just for testing.
@@ -82,7 +76,7 @@ def vicreg_loss(x, y, sim_coef=25.0, var_coef=25.0, cov_coef=1.0):
     # Variance loss with stronger regularization
     std_x = torch.sqrt(x.var(dim=0) + 0.0001)
     std_y = torch.sqrt(y.var(dim=0) + 0.0001)
-    var_loss = torch.mean(F.relu(1.8 - std_x)) + torch.mean(F.relu(1.8 - std_y))
+    var_loss = torch.mean(F.relu(2.0 - std_x)) + torch.mean(F.relu(2.0 - std_y))
     
     # Covariance loss with normalized features
     x = F.normalize(x, dim=-1)
@@ -98,14 +92,12 @@ def vicreg_loss(x, y, sim_coef=25.0, var_coef=25.0, cov_coef=1.0):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1, dropout_rate=0.05):
+    def __init__(self, in_channels, out_channels, stride=1):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride=stride, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
-        self.dropout1 = nn.Dropout2d(dropout_rate)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
         self.bn2 = nn.BatchNorm2d(out_channels)
-        self.dropout2 = nn.Dropout2d(dropout_rate)
         
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
@@ -117,36 +109,10 @@ class ResBlock(nn.Module):
 
     def forward(self, x):
         out = F.leaky_relu(self.bn1(self.conv1(x)), 0.2)
-        out = self.dropout1(out)
         out = self.bn2(self.conv2(out))
         out += self.shortcut(x)
         out = F.leaky_relu(out, 0.2)
-        out = self.dropout2(out)
         return out
-
-
-class AttentionModule(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.query = nn.Conv2d(channels, channels//8, 1)
-        self.key = nn.Conv2d(channels, channels//8, 1)
-        self.value = nn.Conv2d(channels, channels, 1)
-        self.gamma = nn.Parameter(torch.zeros(1))
-        
-    def forward(self, x):
-        batch, c, h, w = x.size()
-        
-        q = self.query(x).view(batch, -1, h*w).permute(0, 2, 1)
-        k = self.key(x).view(batch, -1, h*w)
-        v = self.value(x).view(batch, -1, h*w)
-        
-        attn = torch.bmm(q, k)
-        attn = F.softmax(attn, dim=2)
-        
-        out = torch.bmm(v, attn.permute(0, 2, 1))
-        out = out.view(batch, c, h, w)
-        
-        return x + self.gamma * out
 
 
 class SpatialAttention(nn.Module):
@@ -163,37 +129,34 @@ class SpatialAttention(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, latent_dim=256):  # 恢复到原始潜在维度
+    def __init__(self, latent_dim=256):
         super().__init__()
         self.conv1 = nn.Sequential(
-            nn.Conv2d(2, 64, 7, stride=2, padding=3),  # 恢复原始通道数
+            nn.Conv2d(2, 64, 7, stride=2, padding=3),
             nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, True),
-            nn.Dropout2d(0.05)  # 使用较小的Dropout
+            nn.LeakyReLU(0.2, True)
         )
         
-        # 保持原有的网络结构，但添加轻微的正则化
+        # Remove the fixed positional embedding initialization
+        
+        # 调整网络结构以更好地捕获空间特征
         self.layer1 = nn.Sequential(
-            ResBlock(64, 128, stride=2, dropout_rate=0.05),
-            ResBlock(128, 128, dropout_rate=0.05)
+            ResBlock(64, 128, stride=2),
+            ResBlock(128, 128)
         )
         self.layer2 = nn.Sequential(
-            ResBlock(128, 256, stride=2, dropout_rate=0.05),
-            ResBlock(256, 256, dropout_rate=0.05)
+            ResBlock(128, 256, stride=2),
+            ResBlock(256, 256)
         )
         self.layer3 = nn.Sequential(
-            ResBlock(256, 512, stride=2, dropout_rate=0.05),
-            ResBlock(512, 512, dropout_rate=0.05)
+            ResBlock(256, 512, stride=2),
+            ResBlock(512, 512)
         )
-        
-        # 添加轻量级的空间注意力
-        self.attn = SpatialAttention(512)
         
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Sequential(
             nn.Linear(512, latent_dim),
-            nn.LayerNorm(latent_dim),
-            nn.Dropout(0.1)  # 轻微的Dropout
+            nn.LayerNorm(latent_dim)
         )
         
     def forward(self, x):
@@ -206,7 +169,6 @@ class Encoder(nn.Module):
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.attn(x)  # 应用注意力
         x = self.avg_pool(x)
         x = x.view(x.size(0), -1)
         x = self.fc(x)
@@ -221,33 +183,27 @@ class Encoder(nn.Module):
 
 
 class Predictor(nn.Module):
-    def __init__(self, latent_dim=256, action_dim=2):  # 恢复原始潜在空间维度
+    def __init__(self, latent_dim=256, action_dim=2):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(latent_dim + action_dim, 512),
             nn.LayerNorm(512),
             nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.15),  # 合理的Dropout
+            nn.Dropout(0.1),
             
             nn.Linear(512, 512),
             nn.LayerNorm(512),
             nn.LeakyReLU(0.2, True),
-            nn.Dropout(0.15),  # 合理的Dropout
+            nn.Dropout(0.1),
             
             nn.Linear(512, latent_dim),
             nn.LayerNorm(latent_dim)
         )
         
-        # 维持原有的碰撞预测头，微调结构
+        # Add collision prediction
         self.collision_head = nn.Sequential(
-            nn.Linear(latent_dim, 128),
-            nn.LayerNorm(128),
+            nn.Linear(latent_dim, 64),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(128, 64),
-            nn.LayerNorm(64),
-            nn.ReLU(),
-            nn.Dropout(0.1),
             nn.Linear(64, 1),
             nn.Sigmoid()
         )
@@ -269,7 +225,7 @@ class Predictor(nn.Module):
 
 
 class JEPAModel(nn.Module):
-    def __init__(self, latent_dim=256):  # 恢复原始潜在空间维度
+    def __init__(self, latent_dim=256):
         super().__init__()
         self.encoder = Encoder(latent_dim)
         self.predictor = Predictor(latent_dim)
@@ -300,14 +256,23 @@ class JEPAModel(nn.Module):
         T = actions.shape[1] + 1
         D = self.repr_dim
         
+        # Add debug prints
+        print(f"\nJEPA Forward Debug Info:")
+        print(f"Input states shape: {states.shape}")
+        print(f"Input actions shape: {actions.shape}")
+        
         # Get initial embedding - remove tuple unpacking
         curr_state = self.encoder(states.squeeze(1))  # [B, D]
+        print(f"Initial encoding shape: {curr_state.shape}")
         predictions = [curr_state]
         
         # Predict future states
         for t in range(T-1):
             curr_state = self.predictor(curr_state, actions[:, t])
+            if t % 5 == 0:  # Print every 5 steps
+                print(f"Step {t} prediction stats - mean: {curr_state.mean():.3f}, std: {curr_state.std():.3f}")
             predictions.append(curr_state)
             
         predictions = torch.stack(predictions, dim=1)  # [B, T, D]
+        print(f"Final predictions shape: {predictions.shape}\n")
         return predictions
