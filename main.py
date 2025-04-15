@@ -42,7 +42,26 @@ def load_data(device):
     }
 
     return probe_train_ds, probe_val_ds
+def load_expert_data(device):
+    data_path = "/scratch/DL25SP"
 
+    probe_train_expert_ds = create_wall_dataloader(
+        data_path=f"{data_path}/probe_expert/train",
+        probing=True,
+        device=device,
+        train=True,
+    )
+
+    probe_val_expert_ds = {
+        "expert": create_wall_dataloader(
+            data_path=f"{data_path}/probe_expert/val",
+            probing=True,
+            device=device,
+            train=False,
+        )
+    }
+
+    return probe_train_expert_ds, probe_val_expert_ds
 
 def load_model():
     """Load or initialize the model."""
