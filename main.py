@@ -1,7 +1,7 @@
 from dataset import create_wall_dataloader
 from evaluator import ProbingEvaluator
 import torch
-from models import JEPAModel
+from models import EnhancedJEPAModel, JEPAModel
 import glob
 
 
@@ -66,7 +66,7 @@ def load_expert_data(device):
 def load_model():
     """Load or initialize the model."""
     # TODO: Replace MockModel with your trained model
-    #model = MockModel()
+    device = get_device()
     model = JEPAModel(device=device)
     model.to(device)
     try:
