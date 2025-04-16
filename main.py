@@ -14,7 +14,7 @@ def get_device():
 
 
 def load_data(device):
-    data_path = "/scratch/DL24FA"
+    data_path = "/scratch/DL25SP"
 
     probe_train_ds = create_wall_dataloader(
         data_path=f"{data_path}/probe_normal/train",
@@ -54,7 +54,7 @@ def load_data(device):
 
 
 def load_expert_data(device):
-    data_path = "/scratch/DL24FA"
+    data_path = "/scratch/DL25SP"
 
     probe_train_expert_ds = create_wall_dataloader(
         data_path=f"{data_path}/probe_expert/train",
@@ -77,7 +77,7 @@ def load_expert_data(device):
 
 def load_model():
     """Load or initialize the model."""
-    # 已使用自定义JEPA模型替换MockModel
+    # Using JEPA model for evaluation
     device = get_device()
     model = JEPAModel(device=device)
     model.to(device)
