@@ -10,7 +10,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 
 from schedulers import Scheduler, LRSchedule
-from models import Prober, build_mlp
+from models import Prober, create_mlp
 from configs import ConfigBase
 
 from dataset import WallDataset
@@ -46,7 +46,7 @@ def location_losses(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 class ProbingEvaluator:
     def __init__(
         self,
-        device: "cuda",
+        device: str,
         model: torch.nn.Module,
         probe_train_ds,
         probe_val_ds: dict,
@@ -113,10 +113,9 @@ class ProbingEvaluator:
                 ################################################################################
                 # TODO: Forward pass through your model
                 init_states = batch.states[:, 0:1]  # BS, 1, C, H, W
-                #pred_encs = model(states=init_states, actions=batch.actions)
-                #pred_encs = pred_encs.transpose(0, 1)  # # BS, T, D --> T, BS, D
+                # Use predict_future method which returns tensors in shape [T, BS, D]
                 pred_encs = model.predict_future(init_states, batch.actions)
-                # Make sure pred_encs has shape (T, BS, D) at this point
+                # pred_encs should already have shape (T, BS, D) with updated model implementation
                 ################################################################################
 
                 pred_encs = pred_encs.detach()
