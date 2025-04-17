@@ -77,8 +77,8 @@ def load_expert_data(device):
 
 def load_model():
     """Load or initialize the model."""
-    # Using JEPA model for evaluation
-    device = get_device()
+    # TODO: Replace MockModel with your trained model
+    #model = MockModel()
     model = JEPAModel(device=device)
     model.to(device)
     try:
