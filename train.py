@@ -8,173 +8,218 @@ from dataset import create_wall_dataloader
 from models import JEPAModel
 
 
+def je_loss(predictions, targets):
+    """计算基于余弦相似度的损失"""
+    similarities = F.cosine_similarity(predictions, targets, dim=-1)
+    loss_per_sample = 1 - similarities
+    loss_per_sample = loss_per_sample.sum(dim=1)
+    loss = loss_per_sample.mean()
+    return loss
+
+
 def barlow_twins_loss(z1, z2, lambda_param=0.005):
-    """Barlow Twins loss calculation"""
-    # Get dimensions
+    """计算Barlow Twins损失"""
+    # 获取维度
     B, T, D = z1.shape
     z1_flat = z1.view(-1, D)
     z2_flat = z2.view(-1, D)
     
-    # Normalize
+    # 标准化表示
     z1_norm = (z1_flat - z1_flat.mean(0)) / (z1_flat.std(0) + 1e-5)
     z2_norm = (z2_flat - z2_flat.mean(0)) / (z2_flat.std(0) + 1e-5)
     
-    # Correlation matrix
+    # 计算相关矩阵
     batch_size = z1_norm.shape[0]
-    c = torch.matmul(z1_norm.T, z2_norm) / batch_size
+    corr_matrix = torch.matmul(z1_norm.T, z2_norm) / batch_size
     
-    # Loss components
-    on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
-    off_diag = c.flatten()[:-1].view(c.size(0) - 1, c.size(1) + 1)[:, 1:].pow_(2).sum()
+    # 计算对角线和非对角线损失
+    diag_loss = torch.diagonal(corr_matrix).add_(-1).pow_(2).sum()
+    off_diag_loss = corr_matrix.flatten()[:-1].view(corr_matrix.size(0) - 1, corr_matrix.size(1) + 1)[:, 1:].pow_(2).sum()
     
-    # Combined loss
-    loss = on_diag + lambda_param * off_diag
+    # 合并损失
+    loss = diag_loss + lambda_param * off_diag_loss
     return loss
 
 
-def apply_augmentation(states):
-    """Apply data augmentation to states"""
+def apply_data_augmentation(states):
+    """应用数据增强技术到状态序列"""
     B, T, C, H, W = states.shape
-    aug_states = []
+    augmented_states = []
     
-    for b in range(B):
-        sample = states[b]
+    for batch_idx in range(B):
+        # 获取单个样本的所有帧
+        sample_frames = states[batch_idx]
         
-        # Random transformations
-        do_hflip = random.random() < 0.5
-        do_vflip = random.random() < 0.5
-        angle = random.choice([0, 90, 180, 270])
+        # 随机变换参数 - 对整个序列保持一致
+        do_horizontal_flip = random.random() < 0.5
+        do_vertical_flip = random.random() < 0.5
+        rotation_angles = [0, 90, 180, 270]
+        selected_angle = random.choice(rotation_angles)
         
-        # Process each frame
-        aug_frames = []
-        for t in range(T):
-            frame = sample[t]
+        # 处理序列中的每一帧
+        augmented_frames = []
+        for time_idx in range(T):
+            frame = sample_frames[time_idx]
             
-            # Apply transformations
-            if do_hflip:
+            # 应用水平翻转
+            if do_horizontal_flip:
                 frame = VF.hflip(frame)
-            if do_vflip:
-                frame = VF.vflip(frame)
-            frame = VF.rotate(frame, angle)
             
-            # Add noise
+            # 应用垂直翻转
+            if do_vertical_flip:
+                frame = VF.vflip(frame)
+            
+            # 应用旋转
+            frame = VF.rotate(frame, selected_angle)
+            
+            # 添加随机噪声
             noise = torch.randn_like(frame) * 0.01
             frame = frame + noise
             
-            aug_frames.append(frame)
+            # 保存增强后的帧
+            augmented_frames.append(frame)
         
-        # Stack time dimension
-        aug_frames = torch.stack(aug_frames, dim=0)
-        aug_states.append(aug_frames)
+        # 重新堆叠帧成序列
+        augmented_sequence = torch.stack(augmented_frames, dim=0)
+        augmented_states.append(augmented_sequence)
     
-    # Stack batch dimension
-    result = torch.stack(aug_states, dim=0)
+    # 重新堆叠样本成批次
+    result = torch.stack(augmented_states, dim=0)
     return result
 
 
 def train_model(device):
-    """Train the JEPA model"""
-    print("Loading training data...")
+    """训练JEPA模型"""
+    # 数据路径 - 使用与同学相同的路径
+    data_path = "/scratch/DL25SP/train"
+    print(f"加载训练数据... 路径: {data_path}")
+    
+    # 创建数据加载器
     train_loader = create_wall_dataloader(
-        data_path="/scratch/DL25SP/train",
+        data_path=data_path,
         probing=False,
         device=device,
         train=True,
     )
     
-    print("Initializing model...")
+    # 创建模型
+    print("初始化模型...")
     model = JEPAModel(device=device).to(device)
     
-    # Training settings
+    # 训练配置
     num_epochs = 10
-    jep_co = 0.2
+    learning_rate = 1e-4
+    jepa_loss_weight = 0.2
     
-    # Optimizer
-    optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=1e-4
+    # 打印模型参数数量
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"模型总参数: {trainable_params:,}")
+    
+    # 优化器
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-6)
+    
+    # 学习率调度器
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, 
+        T_max=num_epochs,
+        eta_min=learning_rate/10
     )
     
-    print(f"Starting training for {num_epochs} epochs...")
+    print(f"开始训练，共{num_epochs}轮...")
     
+    # 训练循环
     for epoch in range(num_epochs):
+        # 设置为训练模式
         model.train()
-        total_loss = 0
+        epoch_loss = 0.0
         
-        progress_bar = tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{num_epochs}")
+        # 创建进度条
+        progress_bar = tqdm(train_loader, desc=f"训练轮次 {epoch+1}/{num_epochs}")
         
+        # 处理每个批次
         for batch_idx, batch in enumerate(progress_bar):
-            # Get batch data
+            # 获取批次数据
             states = batch.states
             actions = batch.actions
             
-            # Data augmentation
-            states_aug = apply_augmentation(states)
+            # 数据增强
+            augmented_states = apply_data_augmentation(states)
             
-            # Forward pass
-            predictions = model(states_aug, actions)
+            # 前向传播 - 获取预测的表示
+            predictions = model(augmented_states, actions)
             
-            # Get target representations
+            # 获取真实表示（无梯度）
             with torch.no_grad():
                 targets = model.encoder(
                     states.view(-1, *states.shape[2:])
                 ).view(states.size(0), states.size(1), -1)
             
-            # JEPA loss
-            jepa_loss = F.smooth_l1_loss(predictions, targets)
+            # 计算JEPA损失（使用smooth L1损失而不是je_loss，这与同学的代码一致）
+            repr_loss = F.smooth_l1_loss(predictions, targets)
             
-            # Get encoded representations for Barlow Twins loss
+            # 获取原始表示用于Barlow Twins损失
             z1 = model.encoder(
                 states.view(-1, *states.shape[2:])
             ).view(states.size(0), states.size(1), -1)
             z2 = predictions
-            bt_loss = barlow_twins_loss(z1, z2)
             
-            # Total loss
-            total_loss_batch = jep_co * jepa_loss + (1-jep_co) * bt_loss
+            # 计算Barlow Twins损失
+            regularization_loss = barlow_twins_loss(z1, z2)
             
-            # Backward pass
+            # 总损失
+            batch_loss = jepa_loss_weight * repr_loss + (1 - jepa_loss_weight) * regularization_loss
+            
+            # 反向传播
             optimizer.zero_grad()
-            total_loss_batch.backward()
+            batch_loss.backward()
+            
+            # 参数更新
             optimizer.step()
             
-            # Track loss
-            total_loss += total_loss_batch.item()
+            # 记录损失
+            epoch_loss += batch_loss.item()
             
-            # Update progress bar
+            # 更新进度条信息
             progress_bar.set_postfix({
-                'loss': f'{total_loss_batch.item():.4f}',
-                'jepa': f'{jepa_loss.item():.4f}',
-                'barlow': f'{bt_loss.item():.4f}'
+                'loss': f'{batch_loss.item():.4f}',
+                'jepa': f'{repr_loss.item():.4f}',
+                'bt': f'{regularization_loss.item():.4f}'
             })
         
-        # Epoch summary
-        avg_loss = total_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.8e}")
+        # 学习率调度
+        scheduler.step()
+        
+        # 计算平均损失
+        avg_epoch_loss = epoch_loss / len(train_loader)
+        print(f"轮次 {epoch+1} 完成, 平均损失: {avg_epoch_loss:.6f}, 学习率: {scheduler.get_last_lr()[0]:.6f}")
     
-    # Save model
+    # 保存模型
+    print("保存模型...")
     torch.save(model.state_dict(), 'model_weights.pth')
-    print("Training complete!")
+    print("训练完成!")
+    
     return model
 
 
 def get_device():
+    """获取可用计算设备"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Using device:", device)
+    print(f"使用设备: {device}")
     return device
 
 
 if __name__ == "__main__":
-    # Set random seed
-    seed = 42
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    # 设置随机种子确保可重复性
+    random_seed = 42
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        torch.cuda.manual_seed_all(random_seed)
+        torch.backends.cudnn.deterministic = True
     
-    # Get device
+    # 获取设备
     device = get_device()
     
-    # Train model
+    # 开始训练
     model = train_model(device)
