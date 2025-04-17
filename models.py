@@ -68,7 +68,7 @@ class Prober(torch.nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, input_channels=2, input_size=(65, 65), repr_dim=256, intermediate_dims=[128, 192]):
+    def __init__(self, input_channels=2, input_size=(65, 65), repr_dim=256, projection_hidden_dim=256):
         super().__init__()
         self.conv_net = nn.Sequential(
             nn.Conv2d(input_channels, 32, kernel_size=3, stride=2, padding=1),
@@ -84,23 +84,11 @@ class Encoder(nn.Module):
             conv_output = self.conv_net(sample_input)
             conv_output_size = conv_output.view(1, -1).size(1)
 
-        # 构建更复杂的全连接网络
-        fc_layers = [nn.Flatten()]
-        
-        # 第一层：从卷积输出到第一个中间维度
-        fc_layers.append(nn.Linear(conv_output_size, intermediate_dims[0]))
-        fc_layers.append(nn.ReLU())
-        
-        # 中间层
-        for i in range(len(intermediate_dims)-1):
-            fc_layers.append(nn.Linear(intermediate_dims[i], intermediate_dims[i+1]))
-            fc_layers.append(nn.ReLU())
-            
-        # 输出层：从最后一个中间维度到表示维度
-        fc_layers.append(nn.Linear(intermediate_dims[-1], repr_dim))
-        fc_layers.append(nn.ReLU())
-        
-        self.fc = nn.Sequential(*fc_layers)
+        self.fc = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(conv_output_size, repr_dim),
+            nn.ReLU(),
+        )
 
     def forward(self, x):
         x = self.conv_net(x)
@@ -109,28 +97,37 @@ class Encoder(nn.Module):
 
 
 class Predictor(nn.Module):
-    def __init__(self, repr_dim=256, action_dim=2, hidden_dims=[128, 64]):
+    def __init__(self, repr_dim=256, action_dim=2):
         super().__init__()
-        # 构建更复杂的MLP结构
-        layers = []
+        # 使用更复杂的MLP结构，逐渐扩大隐藏层
+        self.mlp = nn.Sequential(
+            # 第一层：从输入压缩到16维
+            nn.Linear(repr_dim + action_dim, 16),
+            nn.BatchNorm1d(16),
+            nn.ReLU(),
+            # 第二层：从16维扩展到32维
+            nn.Linear(16, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            # 第三层：从32维扩展到64维
+            nn.Linear(32, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            # 最后一层：从64维回到原始表示维度
+            nn.Linear(64, repr_dim)
+        )
         
-        # 输入层: repr_dim + action_dim → hidden_dims[0]
-        layers.append(nn.Linear(repr_dim + action_dim, hidden_dims[0]))
-        layers.append(nn.ReLU())
-        
-        # 中间层
-        for i in range(len(hidden_dims)-1):
-            layers.append(nn.Linear(hidden_dims[i], hidden_dims[i+1]))
-            layers.append(nn.ReLU())
-            
-        # 输出层: hidden_dims[-1] → repr_dim
-        layers.append(nn.Linear(hidden_dims[-1], repr_dim))
-        
-        self.mlp = nn.Sequential(*layers)
-
     def forward(self, repr, action):
         x = torch.cat([repr, action], dim=-1)
-        return self.mlp(x)
+        batch_size = x.shape[0]
+        # 确保输入形状适合BatchNorm1d
+        if len(x.shape) > 2:
+            x = x.view(-1, x.size(-1))
+        out = self.mlp(x)
+        # 如果需要，恢复原始形状
+        if len(repr.shape) > 2:
+            out = out.view(batch_size, -1, repr.size(-1))
+        return out
 
 
 class JEPAModel(nn.Module):
@@ -140,18 +137,8 @@ class JEPAModel(nn.Module):
         self.repr_dim = repr_dim
         self.action_dim = action_dim
 
-        # 使用增强的编码器和预测器
-        self.encoder = Encoder(
-            input_channels=2, 
-            repr_dim=repr_dim, 
-            intermediate_dims=[128, 192]
-        ).to(device)
-        
-        self.predictor = Predictor(
-            repr_dim=repr_dim, 
-            action_dim=action_dim, 
-            hidden_dims=[128, 64]
-        ).to(device)
+        self.encoder = Encoder().to(device)
+        self.predictor = Predictor().to(device)
 
     def forward(self, states, actions):
         """
