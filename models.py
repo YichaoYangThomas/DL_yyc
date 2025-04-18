@@ -77,6 +77,8 @@ class Encoder(nn.Module):
             nn.ReLU(),
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
         )
 
         with torch.no_grad():
@@ -99,35 +101,15 @@ class Encoder(nn.Module):
 class Predictor(nn.Module):
     def __init__(self, repr_dim=256, action_dim=2):
         super().__init__()
-        # 使用更复杂的MLP结构，逐渐扩大隐藏层
         self.mlp = nn.Sequential(
-            # 第一层：从输入压缩到16维
-            nn.Linear(repr_dim + action_dim, 16),
-            nn.BatchNorm1d(16),
+            nn.Linear(repr_dim + action_dim, repr_dim),
             nn.ReLU(),
-            # 第二层：从16维扩展到32维
-            nn.Linear(16, 32),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            # 第三层：从32维扩展到64维
-            nn.Linear(32, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            # 最后一层：从64维回到原始表示维度
-            nn.Linear(64, repr_dim)
+            nn.Linear(repr_dim, repr_dim)
         )
-        
+
     def forward(self, repr, action):
         x = torch.cat([repr, action], dim=-1)
-        batch_size = x.shape[0]
-        # 确保输入形状适合BatchNorm1d
-        if len(x.shape) > 2:
-            x = x.view(-1, x.size(-1))
-        out = self.mlp(x)
-        # 如果需要，恢复原始形状
-        if len(repr.shape) > 2:
-            out = out.view(batch_size, -1, repr.size(-1))
-        return out
+        return self.mlp(x)
 
 
 class JEPAModel(nn.Module):
