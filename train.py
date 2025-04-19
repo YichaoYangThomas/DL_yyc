@@ -43,8 +43,8 @@ def barlow_twins_loss(z1, z2, lambda_param=0.005):
 
 def train_model(device):
     """训练JEPA模型"""
-    # 修改为同学使用的数据路径
-    data_path = "/scratch/DL25SP/train"
+    # 使用正确的数据路径
+    data_path = "/scratch/DL24FA/train"
     print(f"加载训练数据... 路径: {data_path}")
     
     # 创建数据加载器
@@ -60,7 +60,7 @@ def train_model(device):
     model = JEPAModel(device=device).to(device)
     
     # 训练配置 - 简化为与同学一致
-    num_epochs = 10
+    num_epochs = 30
     learning_rate = 1e-4
     jepa_loss_weight = 0.2
     

@@ -79,6 +79,10 @@ class Encoder(nn.Module):
             nn.ReLU(),
             nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
+            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(512, 1024, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
         )
 
         with torch.no_grad():
