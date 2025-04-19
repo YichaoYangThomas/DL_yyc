@@ -71,21 +71,21 @@ class Encoder(nn.Module):
     def __init__(self, input_channels=2, input_size=(65, 65), repr_dim=256, projection_hidden_dim=256):
         super().__init__()
         self.conv_net = nn.Sequential(
-            # 第一层使用更大的卷积核(5x5)以增大初始感受野
-            nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2),
+            # 第一层使用更大的卷积核(7x7)以大幅增大初始感受野
+            nn.Conv2d(input_channels, 32, kernel_size=7, stride=2, padding=3),
             nn.ReLU(),
             nn.Dropout2d(0.1),  # 在第一层后添加少量空间Dropout
             
-            # 第二层保持原有参数
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            # 第二层使用中等大小卷积核(5x5)和空洞卷积
+            nn.Conv2d(32, 64, kernel_size=5, stride=2, padding=4, dilation=2),
             nn.ReLU(),
             
-            # 第三层保持原有参数
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            # 第三层使用步长=1和空洞卷积，保留更多空间细节
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=2, dilation=2),
             nn.ReLU(),
             nn.Dropout2d(0.1),  # 在第三层后添加少量空间Dropout
             
-            # 第四层保持原有参数
+            # 第四层使用大步长进行最终下采样
             nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
         )
