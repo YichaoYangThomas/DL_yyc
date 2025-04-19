@@ -71,42 +71,41 @@ class Encoder(nn.Module):
     def __init__(self, input_channels=2, input_size=(65, 65), repr_dim=256, projection_hidden_dim=256):
         super().__init__()
         self.conv_net = nn.Sequential(
-            nn.Conv2d(input_channels, 32, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(32),
+            # 第一层：增加通道数到48
+            nn.Conv2d(input_channels, 48, kernel_size=5, stride=2, padding=2),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Dropout2d(0.1),  # 添加dropout
+            
+            # 第二层：增加通道数到96
+            nn.Conv2d(48, 96, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(128),
+            
+            # 第三层：使用更大卷积核
+            nn.Conv2d(96, 192, kernel_size=5, stride=2, padding=2),
             nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
+            nn.Dropout2d(0.1),  # 添加dropout
+            
+            # 第四层：使用LeakyReLU激活函数
+            nn.Conv2d(192, 384, kernel_size=3, stride=2, padding=1),
+            nn.LeakyReLU(0.1),
         )
-        
-        # 添加全局平均池化层
-        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
 
         with torch.no_grad():
             sample_input = torch.zeros(1, input_channels, *input_size)
             conv_output = self.conv_net(sample_input)
-            pooled_output = self.global_pool(conv_output)
-            conv_output_size = pooled_output.view(1, -1).size(1)
+            conv_output_size = conv_output.view(1, -1).size(1)
 
-        # 改进输出投影层
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(conv_output_size, projection_hidden_dim),
-            nn.BatchNorm1d(projection_hidden_dim),
-            nn.ReLU(),
-            nn.Linear(projection_hidden_dim, repr_dim),
+            nn.Linear(conv_output_size, repr_dim * 2),  # 增加中间层维度
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.2),  # 添加dropout防止过拟合
+            nn.Linear(repr_dim * 2, repr_dim),
             nn.ReLU(),
         )
 
     def forward(self, x):
         x = self.conv_net(x)
-        x = self.global_pool(x)
         x = self.fc(x)
         return x
 
