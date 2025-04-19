@@ -44,7 +44,7 @@ def barlow_twins_loss(z1, z2, lambda_param=0.005):
 def train_model(device):
     """训练JEPA模型"""
     # 使用正确的数据路径
-    data_path = "/scratch/DL24FA/train"
+    data_path = "/scratch/DL25SP/train"
     print(f"加载训练数据... 路径: {data_path}")
     
     # 创建数据加载器
