@@ -71,23 +71,24 @@ class Encoder(nn.Module):
     def __init__(self, input_channels=2, input_size=(65, 65), repr_dim=256, projection_hidden_dim=256):
         super().__init__()
         self.conv_net = nn.Sequential(
-            # 第一层使用更大的卷积核(5x5)以增大初始感受野
-            nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2),
-            nn.LeakyReLU(0.1),
+            # 第一层：使用更大的7x7卷积核捕获更大范围的空间信息
+            nn.Conv2d(input_channels, 32, kernel_size=7, stride=2, padding=3),
+            nn.ReLU(),
             nn.Dropout2d(0.1),  # 在第一层后添加少量空间Dropout
             
-            # 第二层保持原有参数
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.LeakyReLU(0.1),
+            # 第二层：使用非对称卷积核(3x5)更好地捕获水平特征(墙壁等)
+            nn.Conv2d(32, 64, kernel_size=(3, 5), stride=2, padding=(1, 2)),
+            nn.ReLU(),
             
-            # 第三层保持原有参数
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.LeakyReLU(0.1),
+            # 第三层：使用膨胀卷积(dilation=2)在不增加参数的情况下扩大感受野
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=2, dilation=2),
+            nn.ReLU(),
             nn.Dropout2d(0.1),  # 在第三层后添加少量空间Dropout
             
-            # 第四层保持原有参数
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.LeakyReLU(0.1),
+            # 第四层：使用步长为1的卷积减少信息损失，然后用最大池化进行下采样
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
         )
 
         with torch.no_grad():
@@ -99,7 +100,7 @@ class Encoder(nn.Module):
             nn.Flatten(),
             nn.Dropout(0.2),  # 在特征平铺后添加Dropout，减少过拟合
             nn.Linear(conv_output_size, repr_dim),
-            nn.LeakyReLU(0.1),
+            nn.ReLU(),
         )
 
     def forward(self, x):
@@ -113,7 +114,7 @@ class Predictor(nn.Module):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(repr_dim + action_dim, repr_dim),
-            nn.LeakyReLU(0.1),
+            nn.ReLU(),
             nn.Linear(repr_dim, repr_dim)
         )
 
