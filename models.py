@@ -73,21 +73,21 @@ class Encoder(nn.Module):
         self.conv_net = nn.Sequential(
             # 第一层使用更大的卷积核(5x5)以增大初始感受野
             nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2),
-            nn.LeakyReLU(0.1),  # 使用LeakyReLU替代ReLU
+            nn.LeakyReLU(0.1),
             nn.Dropout2d(0.1),  # 在第一层后添加少量空间Dropout
             
             # 第二层保持原有参数
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.LeakyReLU(0.1),  # 使用LeakyReLU替代ReLU
+            nn.LeakyReLU(0.1),
             
             # 第三层保持原有参数
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.LeakyReLU(0.1),  # 使用LeakyReLU替代ReLU
+            nn.LeakyReLU(0.1),
             nn.Dropout2d(0.1),  # 在第三层后添加少量空间Dropout
             
             # 第四层保持原有参数
             nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.LeakyReLU(0.1),  # 使用LeakyReLU替代ReLU
+            nn.LeakyReLU(0.1),
         )
 
         with torch.no_grad():
@@ -99,24 +99,8 @@ class Encoder(nn.Module):
             nn.Flatten(),
             nn.Dropout(0.2),  # 在特征平铺后添加Dropout，减少过拟合
             nn.Linear(conv_output_size, repr_dim),
-            nn.LeakyReLU(0.1),  # 使用LeakyReLU替代ReLU
+            nn.LeakyReLU(0.1),
         )
-        
-        # 应用权重初始化
-        self._initialize_weights()
-        
-    def _initialize_weights(self):
-        """使用Kaiming初始化方法初始化模型权重"""
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                # 对卷积层使用kaiming_normal初始化，考虑到LeakyReLU的特性
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu', a=0.1)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                # 对线性层使用kaiming_normal初始化，考虑到LeakyReLU的特性
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu', a=0.1)
-                nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
         x = self.conv_net(x)
@@ -129,20 +113,9 @@ class Predictor(nn.Module):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(repr_dim + action_dim, repr_dim),
-            nn.LeakyReLU(0.1),  # 使用LeakyReLU替代ReLU
+            nn.LeakyReLU(0.1),
             nn.Linear(repr_dim, repr_dim)
         )
-        
-        # 应用权重初始化
-        self._initialize_weights()
-    
-    def _initialize_weights(self):
-        """使用Kaiming初始化方法初始化模型权重"""
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                # 对线性层使用kaiming_normal初始化，考虑到LeakyReLU的特性
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu', a=0.1)
-                nn.init.constant_(m.bias, 0)
 
     def forward(self, repr, action):
         x = torch.cat([repr, action], dim=-1)
