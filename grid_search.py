@@ -191,8 +191,27 @@ def train_with_params(device, jepa_loss_weight, dropout_rate, kernel_size, chann
 
 # 评估模型函数
 def evaluate_model(device, model_path):
-    # 加载模型
-    model = JEPAModel(device=device).to(device)
+    # 从文件名解析参数
+    # 格式: model_weights_grid_0.1_0.1_5_1.25.pth
+    try:
+        params = model_path.replace('model_weights_grid_', '').replace('.pth', '').split('_')
+        jepa_loss_weight = float(params[0])
+        dropout_rate = float(params[1])
+        kernel_size = int(params[2])
+        channel_multiplier = float(params[3])
+        
+        print(f"从文件名解析的参数: jepa_loss_weight={jepa_loss_weight}, dropout_rate={dropout_rate}, "
+              f"kernel_size={kernel_size}, channel_multiplier={channel_multiplier}")
+        
+        # 创建具有相同参数的模型
+        model, _ = create_model_with_params(
+            device, jepa_loss_weight, dropout_rate, kernel_size, channel_multiplier
+        )
+    except Exception as e:
+        print(f"解析模型参数失败，使用默认模型: {str(e)}")
+        model = JEPAModel(device=device).to(device)
+    
+    # 加载模型权重
     model.load_state_dict(torch.load(model_path))
     model.eval()
     
