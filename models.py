@@ -74,7 +74,7 @@ class Encoder(nn.Module):
             # 第一层使用更大的卷积核(5x5)以增大初始感受野
             nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2),
             nn.ReLU(),
-            nn.Dropout2d(0.2),  # 在第一层后添加少量空间Dropout
+            nn.Dropout2d(0.05),  # 在第一层后添加少量空间Dropout
             
             # 第二层保持原有参数
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
@@ -83,7 +83,7 @@ class Encoder(nn.Module):
             # 第三层保持原有参数
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.2),  # 在第三层后添加少量空间Dropout
+            nn.Dropout2d(0.05),  # 在第三层后添加少量空间Dropout
             
             # 第四层保持原有参数
             nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
@@ -97,7 +97,7 @@ class Encoder(nn.Module):
 
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Dropout(0.2),  # 在特征平铺后添加Dropout，减少过拟合
+            nn.Dropout(0.1),  # 在特征平铺后添加Dropout，减少过拟合
             nn.Linear(conv_output_size, repr_dim),
             nn.ReLU(),
         )
