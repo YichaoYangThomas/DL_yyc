@@ -113,7 +113,7 @@ def train_with_params(device, jepa_loss_weight, dropout_rate, kernel_size, chann
     # 创建训练数据加载器
     from dataset import create_wall_dataloader
     train_loader = create_wall_dataloader(
-        data_path="/scratch/DL25SPtrain",
+        data_path="/scratch/DL25SP/train",
         probing=False,
         device=device,
         train=True,
