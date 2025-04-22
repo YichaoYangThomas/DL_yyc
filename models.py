@@ -97,7 +97,7 @@ class Encoder(nn.Module):
 
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Dropout(0.1),  # 在特征平铺后添加Dropout，减少过拟合
+            nn.Dropout(0.2),  # 在特征平铺后添加Dropout，减少过拟合
             nn.Linear(conv_output_size, repr_dim),
             nn.ReLU(),
         )
