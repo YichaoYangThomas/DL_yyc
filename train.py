@@ -61,8 +61,8 @@ def train_model(device):
     
     # 训练配置 - 简化为与同学一致
     num_epochs = 10
-    learning_rate = 5e-5
-    jepa_loss_weight = 0.6
+    learning_rate = 1e-4
+    jepa_loss_weight = 0.8
     
     # 打印模型参数数量
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
