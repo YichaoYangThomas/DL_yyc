@@ -71,22 +71,26 @@ class Encoder(nn.Module):
     def __init__(self, input_channels=2, input_size=(65, 65), repr_dim=256, projection_hidden_dim=256):
         super().__init__()
         self.conv_net = nn.Sequential(
-            # 第一层使用更大的卷积核(5x5)以增大初始感受野
-            nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2),
+            # 第一层 - 使用更大的卷积核捕获更大的空间特征
+            nn.Conv2d(input_channels, 48, kernel_size=5, stride=2, padding=2),
             nn.ReLU(),
-            nn.Dropout2d(0.1),  # 在第一层后添加少量空间Dropout
+            nn.Dropout2d(0.1),
             
-            # 第二层保持原有参数
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            # 第二层 - 增加通道数以提取更丰富的特征
+            nn.Conv2d(48, 96, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
             
-            # 第三层保持原有参数
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            # 第三层 - 使用更大核进一步整合特征
+            nn.Conv2d(96, 160, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(0.1),  # 在第三层后添加少量空间Dropout
+            nn.Dropout2d(0.1),
             
-            # 第四层保持原有参数
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            # 第四层 - 深度特征提取
+            nn.Conv2d(160, 256, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            
+            # 第五层(新增) - 最终特征整合
+            nn.Conv2d(256, 320, kernel_size=3, stride=1, padding=1),  # stride=1保持空间维度
             nn.ReLU(),
         )
 
@@ -97,7 +101,7 @@ class Encoder(nn.Module):
 
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Dropout(0.2),  # 在特征平铺后添加Dropout，减少过拟合
+            nn.Dropout(0.2),
             nn.Linear(conv_output_size, repr_dim),
             nn.ReLU(),
         )
