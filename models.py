@@ -5,6 +5,33 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# 添加空间注意力模块
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        # 使用7x7卷积捕获更大的感受野进行注意力计算
+        padding = kernel_size // 2
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # 生成两个特征图：平均池化和最大池化的结果
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        
+        # 拼接这两个特征图
+        y = torch.cat([avg_out, max_out], dim=1)
+        
+        # 通过卷积得到空间注意力图
+        y = self.conv(y)
+        
+        # Sigmoid得到0-1之间的权重
+        y = self.sigmoid(y)
+        
+        # 应用注意力权重
+        return x * y  # 元素乘法，增强重要特征
+
+
 def build_mlp(layers_dims: List[int]):
     layers = []
     for i in range(len(layers_dims) - 2):
@@ -70,10 +97,16 @@ class Prober(torch.nn.Module):
 class Encoder(nn.Module):
     def __init__(self, input_channels=2, input_size=(65, 65), repr_dim=256, projection_hidden_dim=256):
         super().__init__()
+        
+        # 空间注意力模块
+        self.sa1 = SpatialAttention(kernel_size=5)  # 第一个空间注意力，用小一点的卷积核
+        self.sa2 = SpatialAttention(kernel_size=7)  # 第二个空间注意力，用大一点的卷积核
+        
         self.conv_net = nn.Sequential(
             # 第一层使用更大的卷积核(5x5)以增大初始感受野
             nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2),
             nn.ReLU(),
+            # 第一个注意力模块在这里应用（外部应用，不在Sequential中）
             nn.Dropout2d(0.1),  # 在第一层后添加少量空间Dropout
             
             # 第二层保持原有参数
@@ -83,16 +116,12 @@ class Encoder(nn.Module):
             # 第三层保持原有参数
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
+            # 第二个注意力模块在这里应用（外部应用，不在Sequential中）
             nn.Dropout2d(0.1),  # 在第三层后添加少量空间Dropout
             
             # 第四层保持原有参数
             nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-            
-            # 新增第五层，使用stride=1避免过度下采样
-            nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.Dropout2d(0.1),  # 在第五层后添加少量空间Dropout
         )
 
         with torch.no_grad():
@@ -108,7 +137,28 @@ class Encoder(nn.Module):
         )
 
     def forward(self, x):
-        x = self.conv_net(x)
+        # 分步执行卷积层并应用注意力机制
+        # 第一层卷积+注意力
+        x = self.conv_net[0](x)  # Conv2d
+        x = self.conv_net[1](x)  # ReLU
+        x = self.sa1(x)          # 空间注意力
+        x = self.conv_net[2](x)  # Dropout2d
+        
+        # 第二层卷积
+        x = self.conv_net[3](x)  # Conv2d
+        x = self.conv_net[4](x)  # ReLU
+        
+        # 第三层卷积+注意力
+        x = self.conv_net[5](x)  # Conv2d
+        x = self.conv_net[6](x)  # ReLU
+        x = self.sa2(x)          # 空间注意力
+        x = self.conv_net[7](x)  # Dropout2d
+        
+        # 第四层卷积
+        x = self.conv_net[8](x)  # Conv2d
+        x = self.conv_net[9](x)  # ReLU
+        
+        # 全连接层
         x = self.fc(x)
         return x
 
