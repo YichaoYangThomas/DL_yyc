@@ -43,7 +43,7 @@ def barlow_twins_loss(z1, z2, lambda_param=0.005):
 
 def train_model(device):
     """训练JEPA模型"""
-    # 使用正确的数据路径
+    # 修改为同学使用的数据路径
     data_path = "/scratch/DL25SP/train"
     print(f"加载训练数据... 路径: {data_path}")
     
@@ -59,8 +59,8 @@ def train_model(device):
     print("初始化模型...")
     model = JEPAModel(device=device).to(device)
     
-    # 训练配置 - 增加训练轮数
-    num_epochs = 30  # 从10轮增加到30轮
+    # 训练配置 - 简化为与同学一致
+    num_epochs = 10
     learning_rate = 1e-4
     jepa_loss_weight = 0.2
     
@@ -68,15 +68,8 @@ def train_model(device):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"模型总参数: {trainable_params:,}")
     
-    # 优化器
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-6)
-    
-    # 添加学习率调度器 - 余弦退火
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, 
-        T_max=num_epochs,
-        eta_min=learning_rate/10
-    )
+    # 优化器 - 移除权重衰减，与同学保持一致
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     
     print(f"开始训练，共{num_epochs}轮...")
     
@@ -95,7 +88,7 @@ def train_model(device):
             states = batch.states
             actions = batch.actions
             
-            # 前向传播 - 获取预测的表示
+            # 前向传播 - 获取预测的表示 (不使用数据增强)
             predictions = model(states, actions)
             
             # 获取真实表示（无梯度）
@@ -131,16 +124,12 @@ def train_model(device):
             
             # 更新进度条信息
             progress_bar.set_postfix({
-                'loss': f'{total_loss_batch.item():.4f}',
-                'lr': f'{scheduler.get_last_lr()[0]:.6f}'
+                'loss': f'{total_loss_batch.item():.4f}'
             })
-        
-        # 更新学习率
-        scheduler.step()
         
         # 计算平均损失
         avg_loss = total_loss / len(train_loader)
-        print(f"轮次 {epoch+1} 完成, 平均损失: {avg_loss:.8e}, 学习率: {scheduler.get_last_lr()[0]:.6f}")
+        print(f"轮次 {epoch+1} 完成, 平均损失: {avg_loss:.8e}")
     
     # 保存模型
     print("保存模型...")

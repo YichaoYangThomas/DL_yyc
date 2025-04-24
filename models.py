@@ -5,55 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# 使用更强的CBAM注意力模块(通道+空间双重注意力)
-class ChannelAttention(nn.Module):
-    def __init__(self, in_planes, reduction_ratio=16):
-        super(ChannelAttention, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        
-        # 共享MLP
-        self.fc = nn.Sequential(
-            nn.Conv2d(in_planes, in_planes // reduction_ratio, 1, bias=False),
-            nn.ReLU(),
-            nn.Conv2d(in_planes // reduction_ratio, in_planes, 1, bias=False)
-        )
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = self.fc(self.avg_pool(x))
-        max_out = self.fc(self.max_pool(x))
-        out = avg_out + max_out
-        return self.sigmoid(out)
-
-
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        padding = kernel_size // 2
-        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=padding, bias=False)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        y = torch.cat([avg_out, max_out], dim=1)
-        y = self.conv(y)
-        return self.sigmoid(y)
-
-
-class CBAM(nn.Module):
-    def __init__(self, in_planes, kernel_size=7):
-        super(CBAM, self).__init__()
-        self.ca = ChannelAttention(in_planes)
-        self.sa = SpatialAttention(kernel_size=kernel_size)
-
-    def forward(self, x):
-        x = x * self.ca(x)  # 应用通道注意力
-        x = x * self.sa(x)  # 应用空间注意力
-        return x
-
-
 def build_mlp(layers_dims: List[int]):
     layers = []
     for i in range(len(layers_dims) - 2):
@@ -119,35 +70,21 @@ class Prober(torch.nn.Module):
 class Encoder(nn.Module):
     def __init__(self, input_channels=2, input_size=(65, 65), repr_dim=256, projection_hidden_dim=256):
         super().__init__()
-        
-        # CBAM注意力模块 - 更强大的注意力机制
-        self.cbam1 = CBAM(32, kernel_size=5)  # 第一个CBAM注意力
-        self.cbam2 = CBAM(128, kernel_size=7)  # 第二个CBAM注意力
-        
-        # 添加批归一化以提高训练稳定性
         self.conv_net = nn.Sequential(
             # 第一层使用更大的卷积核(5x5)以增大初始感受野
             nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2),
-            nn.BatchNorm2d(32),  # 添加批归一化
             nn.ReLU(),
-            # 第一个注意力模块在这里应用（外部应用，不在Sequential中）
-            nn.Dropout2d(0.1),  # 在第一层后添加少量空间Dropout
             
             # 第二层保持原有参数
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(64),  # 添加批归一化
             nn.ReLU(),
             
             # 第三层保持原有参数
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(128),  # 添加批归一化
             nn.ReLU(),
-            # 第二个注意力模块在这里应用（外部应用，不在Sequential中）
-            nn.Dropout2d(0.1),  # 在第三层后添加少量空间Dropout
             
             # 第四层保持原有参数
             nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(256),  # 添加批归一化
             nn.ReLU(),
         )
 
@@ -158,38 +95,12 @@ class Encoder(nn.Module):
 
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Dropout(0.2),  # 在特征平铺后添加Dropout，减少过拟合
             nn.Linear(conv_output_size, repr_dim),
             nn.ReLU(),
         )
 
     def forward(self, x):
-        # 分步执行卷积层并应用注意力机制
-        # 第一层卷积+注意力
-        x = self.conv_net[0](x)  # Conv2d
-        x = self.conv_net[1](x)  # BatchNorm
-        x = self.conv_net[2](x)  # ReLU
-        x = self.cbam1(x)        # CBAM注意力
-        x = self.conv_net[3](x)  # Dropout2d
-        
-        # 第二层卷积
-        x = self.conv_net[4](x)  # Conv2d
-        x = self.conv_net[5](x)  # BatchNorm
-        x = self.conv_net[6](x)  # ReLU
-        
-        # 第三层卷积+注意力
-        x = self.conv_net[7](x)  # Conv2d
-        x = self.conv_net[8](x)  # BatchNorm
-        x = self.conv_net[9](x)  # ReLU
-        x = self.cbam2(x)        # CBAM注意力
-        x = self.conv_net[10](x) # Dropout2d
-        
-        # 第四层卷积
-        x = self.conv_net[11](x) # Conv2d
-        x = self.conv_net[12](x) # BatchNorm
-        x = self.conv_net[13](x) # ReLU
-        
-        # 全连接层
+        x = self.conv_net(x)
         x = self.fc(x)
         return x
 
@@ -197,33 +108,15 @@ class Encoder(nn.Module):
 class Predictor(nn.Module):
     def __init__(self, repr_dim=256, action_dim=2):
         super().__init__()
-        # 改进的MLP，添加残差连接
-        self.input_proj = nn.Linear(repr_dim + action_dim, repr_dim)
-        self.act1 = nn.ReLU()
-        self.hidden = nn.Linear(repr_dim, repr_dim)
-        self.act2 = nn.ReLU()
-        
-        # 增加层次以增强表达能力
-        self.norm = nn.LayerNorm(repr_dim)
-        
-        # 初始化权重
-        nn.init.xavier_uniform_(self.input_proj.weight)
-        nn.init.xavier_uniform_(self.hidden.weight)
+        self.mlp = nn.Sequential(
+            nn.Linear(repr_dim + action_dim, repr_dim),
+            nn.ReLU(),
+            nn.Linear(repr_dim, repr_dim)
+        )
 
     def forward(self, repr, action):
         x = torch.cat([repr, action], dim=-1)
-        # 第一层投影
-        h = self.input_proj(x)
-        h = self.act1(h)
-        
-        # 第二层投影+残差连接
-        res = h
-        h = self.hidden(h)
-        h = h + res  # 残差连接
-        h = self.norm(h)  # 标准化
-        h = self.act2(h)
-        
-        return h
+        return self.mlp(x)
 
 
 class JEPAModel(nn.Module):
