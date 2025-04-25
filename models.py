@@ -71,16 +71,19 @@ class Encoder(nn.Module):
     def __init__(self, input_channels=2, input_size=(65, 65), repr_dim=256, projection_hidden_dim=256):
         super().__init__()
         self.conv_net = nn.Sequential(
-            # 第一层使用更大的卷积核(5x5)以增大初始感受野
-            nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2),
+            # 第一层使用更大的卷积核(7x7)以显著增大初始感受野
+            nn.Conv2d(input_channels, 32, kernel_size=7, stride=2, padding=3),
             nn.ReLU(),
             
-            # 第二层保持原有参数
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            # 添加最大池化层进一步增大感受野
+            nn.MaxPool2d(kernel_size=2, stride=1, padding=1),
+            
+            # 第二层使用膨胀卷积(dilation=2)扩大感受野，保持空间分辨率
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=2, dilation=2),
             nn.ReLU(),
             
-            # 第三层保持原有参数
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            # 第三层同样使用膨胀卷积进一步扩大感受野
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=2, dilation=2),
             nn.ReLU(),
             
             # 第四层保持原有参数
