@@ -47,8 +47,8 @@ def load_data(device):
 def load_model():
     """Load or initialize the model."""
     # TODO: Replace MockModel with your trained model
-    #model = MockModel()
-    model = JEPAModel(device=device)
+    # 使用优化后的参数命名
+    model = JEPAModel(device=device, embed_dim=256, action_dim=2)
     model.to(device)
     try:
         model.load_state_dict(torch.load('model_weights.pth'))
@@ -56,6 +56,29 @@ def load_model():
     except FileNotFoundError:
         print("No saved model found, initializing a new model.")
     return model
+
+
+def load_expert_data(device):
+    """加载专家评估数据集"""
+    data_path = "/scratch/DL25SP"
+
+    probe_train_expert_ds = create_wall_dataloader(
+        data_path=f"{data_path}/probe_expert/train",
+        probing=True,
+        device=device,
+        train=True,
+    )
+
+    probe_val_expert_ds = {
+        "expert": create_wall_dataloader(
+            data_path=f"{data_path}/probe_expert/val",
+            probing=True,
+            device=device,
+            train=False,
+        )
+    }
+
+    return probe_train_expert_ds, probe_val_expert_ds
 
 
 def evaluate_model(device, model, probe_train_ds, probe_val_ds):
@@ -82,5 +105,10 @@ if __name__ == "__main__":
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total Trainable Parameters: {total_params:,}")
 
+    # 评估普通数据
     probe_train_ds, probe_val_ds = load_data(device)
     evaluate_model(device, model, probe_train_ds, probe_val_ds)
+    
+    # 评估专家数据
+    probe_train_expert_ds, probe_val_expert_ds = load_expert_data(device)
+    evaluate_model(device, model, probe_train_expert_ds, probe_val_expert_ds)
