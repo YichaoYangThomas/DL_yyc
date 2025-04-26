@@ -16,9 +16,6 @@ def build_mlp(layers_dims: List[int]):
 
 
 class MockModel(torch.nn.Module):
-    """
-    仅用于测试的模拟模型
-    """
     def __init__(self, device="cuda", bs=64, n_steps=17, output_dim=256):
         super().__init__()
         self.device = device
@@ -27,27 +24,11 @@ class MockModel(torch.nn.Module):
         self.repr_dim = 256
 
     def forward(self, states, actions):
-        """
-        Args:
-            During training:
-                states: [B, T, Ch, H, W]
-            During inference:
-                states: [B, 1, Ch, H, W]
-            actions: [B, T-1, 2]
-
-        Output:
-            predictions: [B, T, D]
-        """
         return torch.randn((self.bs, self.n_steps, self.repr_dim)).to(self.device)
 
 
 class Prober(torch.nn.Module):
-    def __init__(
-        self,
-        embedding: int,
-        arch: str,
-        output_shape: List[int],
-    ):
+    def __init__(self, embedding: int, arch: str, output_shape: List[int]):
         super().__init__()
         self.output_dim = np.prod(output_shape)
         self.output_shape = output_shape
@@ -63,27 +44,19 @@ class Prober(torch.nn.Module):
         self.prober = torch.nn.Sequential(*layers)
 
     def forward(self, e):
-        output = self.prober(e)
-        return output
+        return self.prober(e)
 
 
 class Encoder(nn.Module):
     def __init__(self, input_channels=2, input_size=(65, 65), embedding_dim=256, hidden_dim=256):
         super().__init__()
         self.feature_extractor = nn.Sequential(
-            # 第一层使用更大的卷积核(5x5)以增大初始感受野
             nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2),
             nn.ReLU(),
-            
-            # 第二层保持原有参数
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-            
-            # 第三层保持原有参数
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-            
-            # 第四层保持原有参数
             nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
         )
@@ -100,9 +73,7 @@ class Encoder(nn.Module):
         )
 
     def forward(self, x):
-        features = self.feature_extractor(x)
-        embeddings = self.projection_head(features)
-        return embeddings
+        return self.projection_head(self.feature_extractor(x))
 
 
 class Predictor(nn.Module):
@@ -115,9 +86,7 @@ class Predictor(nn.Module):
         )
 
     def forward(self, state_embedding, action):
-        combined_input = torch.cat([state_embedding, action], dim=-1)
-        next_state_embedding = self.transition_network(combined_input)
-        return next_state_embedding
+        return self.transition_network(torch.cat([state_embedding, action], dim=-1))
 
 
 class JEPAModel(nn.Module):
@@ -131,67 +100,32 @@ class JEPAModel(nn.Module):
         self.predictor = Predictor(embedding_dim=embedding_dim, action_dim=action_dim).to(device)
 
     def forward(self, states, actions):
-        """
-        Args:
-            During training:
-                states: [B, T, Ch, H, W]
-            During inference:
-                states: [B, 1, Ch, H, W]
-            actions: [B, T-1, 2]
-
-        Output:
-            predictions: [B, T, D]
-        """
         batch_size, seq_len, channels, height, width = states.shape
-        device = states.device
         
         embeddings_sequence = []
-        current_embedding = self.encoder(states[:, 0])  # [B, D]
-        embeddings_sequence.append(current_embedding.unsqueeze(1))  # [B, 1, D]
+        current_embedding = self.encoder(states[:, 0])
+        embeddings_sequence.append(current_embedding.unsqueeze(1))
         
         for t in range(seq_len - 1):
             current_action = actions[:, t]
             predicted_embedding = self.predictor(current_embedding, current_action)
             embeddings_sequence.append(predicted_embedding.unsqueeze(1))
-            current_embedding = predicted_embedding  # Update current embedding with prediction
+            current_embedding = predicted_embedding
 
-        # Concatenate all embeddings along sequence dimension
-        all_embeddings = torch.cat(embeddings_sequence, dim=1)  # [B, T, D]
-        
-        return all_embeddings
+        return torch.cat(embeddings_sequence, dim=1)
 
     def predict_future(self, init_states, actions):
-        """
-        根据初始状态和动作序列展开预测未来表示。
-
-        Args:
-            init_states: [B, 1, Ch, H, W]
-            actions: [B, T-1, 2]
-
-        Returns:
-            predicted_reprs: [T, B, D]
-        """
         batch_size, _, channels, height, width = init_states.shape
         action_seq_len = actions.shape[1]
-        total_seq_len = action_seq_len + 1
         
-        # 存储预测结果
         predicted_embeddings = []
+        current_embedding = self.encoder(init_states[:, 0])
+        predicted_embeddings.append(current_embedding.unsqueeze(0))
         
-        # 初始状态
-        current_embedding = self.encoder(init_states[:, 0])  # [B, D]
-        predicted_embeddings.append(current_embedding.unsqueeze(0))  # [1, B, D]
-        
-        # 循环预测
         for t in range(action_seq_len):
-            current_action = actions[:, t]  # [B, action_dim]
-            # 预测下一个表示
-            next_embedding = self.predictor(current_embedding, current_action)  # [B, D]
-            predicted_embeddings.append(next_embedding.unsqueeze(0))  # [1, B, D]
-            # 更新当前表示
+            current_action = actions[:, t]
+            next_embedding = self.predictor(current_embedding, current_action)
+            predicted_embeddings.append(next_embedding.unsqueeze(0))
             current_embedding = next_embedding
         
-        # 拼接所有预测
-        all_predicted_embeddings = torch.cat(predicted_embeddings, dim=0)  # [T, B, D]
-        
-        return all_predicted_embeddings
+        return torch.cat(predicted_embeddings, dim=0)
