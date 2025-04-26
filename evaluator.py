@@ -70,7 +70,7 @@ class ProbingEvaluator:
         """
         Probes whether the predicted embeddings capture the future locations
         """
-        embed_dim = self.model.embed_dim
+        repr_dim = self.model.embedding_dim
         dataset = self.ds
         model = self.model
 
@@ -83,7 +83,7 @@ class ProbingEvaluator:
 
         prober_output_shape = getattr(test_batch, "locations")[0, 0].shape
         prober = Prober(
-            embed_dim,
+            repr_dim,
             config.prober_arch,
             output_shape=prober_output_shape,
         ).to(self.device)
