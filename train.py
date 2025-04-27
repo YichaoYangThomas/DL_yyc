@@ -58,7 +58,7 @@ def train_model(device):
     model = JEPAModel(device=device).to(device)
     
     # Training configuration
-    num_epochs = 100
+    num_epochs = 200
     learning_rate = 5e-5
     jepa_loss_weight = 0.2
     
