@@ -58,9 +58,9 @@ def train_model(device):
     model = JEPAModel(device=device).to(device)
     
     # Training configuration
-    num_epochs = 100
+    num_epochs = 150
     learning_rate =1e-5
-    jepa_loss_weight = 0.15
+    jepa_loss_weight = 0.2
     
     # Count model parameters
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
