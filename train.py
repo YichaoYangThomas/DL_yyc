@@ -60,7 +60,7 @@ def train_model(device):
     # Training configuration
     num_epochs = 100
     learning_rate =1e-5
-    jepa_loss_weight = 0.25
+    jepa_loss_weight = 0.15
     
     # Count model parameters
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
