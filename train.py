@@ -59,7 +59,7 @@ def train_model(device):
     
     # Training configuration
     num_epochs = 150
-    learning_rate =1e-5
+    learning_rate =5e-5
     jepa_loss_weight = 0.2
     
     # Count model parameters
