@@ -52,13 +52,13 @@ class Encoder(nn.Module):
         super().__init__()
         self.feature_extractor = nn.Sequential(
             nn.Conv2d(input_channels, 32, kernel_size=5, stride=2, padding=2),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
+            nn.LeakyReLU(),
         )
 
         with torch.no_grad():
@@ -69,7 +69,7 @@ class Encoder(nn.Module):
         self.projection_head = nn.Sequential(
             nn.Flatten(),
             nn.Linear(flattened_size, embedding_dim),
-            nn.ReLU(),
+            nn.LeakyReLU(),
         )
 
     def forward(self, x):
@@ -81,8 +81,9 @@ class Predictor(nn.Module):
         super().__init__()
         self.transition_network = nn.Sequential(
             nn.Linear(embedding_dim + action_dim, embedding_dim),
-            nn.ReLU(),
-            nn.Linear(embedding_dim, embedding_dim)
+            nn.LeakyReLU(),
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.LeakyReLU(),
         )
 
     def forward(self, state_embedding, action):
